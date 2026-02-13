@@ -11,11 +11,12 @@
  *   npx pcf-dev-proxy --browser edge       # Use Edge instead of Chrome
  */
 
+import * as crypto from "crypto";
 import * as fs from "fs";
-import * as http from "http";
+import * as os from "os";
 import * as path from "path";
 import * as readline from "readline";
-import { execSync } from "child_process";
+import { execSync, spawn } from "child_process";
 import * as mockttp from "mockttp";
 
 // ---------------------------------------------------------------------------
@@ -91,39 +92,19 @@ const CWD = process.cwd();
 const CACHE_DIR = path.join(CWD, ".cache");
 const CA_CERT_PATH = path.join(CACHE_DIR, "proxy-ca.pem");
 const CA_KEY_PATH = path.join(CACHE_DIR, "proxy-ca.key");
-const PAC_FILE_PATH = path.join(CACHE_DIR, "proxy.pac");
 
 const CA_NAME = "PCF Dev Proxy CA";
 
 type Browser = "chrome" | "edge";
 
 // ---------------------------------------------------------------------------
-// PAC file
+// Browser data dir (isolated profile like HTTP Toolkit)
 // ---------------------------------------------------------------------------
 
-function writePacFile(port: number) {
-	fs.mkdirSync(CACHE_DIR, { recursive: true });
-	fs.writeFileSync(PAC_FILE_PATH, `function FindProxyForURL(url, host) {
-	if (shExpMatch(host, "*.dynamics.com"))
-		return "PROXY 127.0.0.1:${port}; DIRECT";
-	return "DIRECT";
-}
-`);
-}
-
-function servePacFileOverHttp(): Promise<string> {
-	return new Promise((resolve, reject) => {
-		const srv = http.createServer((_req, res) => {
-			const pac = fs.readFileSync(PAC_FILE_PATH, "utf-8");
-			res.writeHead(200, { "content-type": "application/x-ns-proxy-autoconfig" });
-			res.end(pac);
-		});
-		srv.listen(0, "127.0.0.1", () => {
-			const addr = srv.address();
-			if (!addr || typeof addr === "string") return reject(new Error("Failed to bind PAC server"));
-			resolve(`http://127.0.0.1:${addr.port}/proxy.pac`);
-		});
-	});
+function getBrowserDataDir(): string {
+	const dir = path.join(os.tmpdir(), "pcf-dev-proxy-browser");
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,41 +128,14 @@ async function loadOrCreateCA() {
 	return ca;
 }
 
-function isCATrusted(): boolean {
-	if (!fs.existsSync(CA_CERT_PATH)) return false;
-	try {
-		if (process.platform === "darwin") {
-			execSync(`security verify-cert -c "${CA_CERT_PATH}" 2>/dev/null`, { stdio: "pipe" });
-		} else if (process.platform === "win32") {
-			const out = execSync(`certutil -store Root "${CA_NAME}"`, { encoding: "utf-8", stdio: "pipe" });
-			if (!out.includes(CA_NAME)) return false;
-		} else {
-			return false;
-		}
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-function trustCA() {
-	if (process.platform === "darwin") {
-		console.log("Adding CA certificate to macOS keychain (requires sudo)...");
-		execSync(`sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "${CA_CERT_PATH}"`, {
-			stdio: "inherit",
-		});
-	} else if (process.platform === "win32") {
-		console.log("Adding CA certificate to Windows certificate store...");
-		execSync(`certutil -addstore -f Root "${CA_CERT_PATH}"`, { stdio: "inherit" });
-	} else {
-		console.log(`Unsupported platform. Manually trust: ${CA_CERT_PATH}`);
-		process.exit(1);
-	}
-	console.log("CA certificate trusted.\n");
+function getSpkiFingerprint(certPem: string): string {
+	const cert = new crypto.X509Certificate(certPem);
+	const spki = cert.publicKey.export({ type: "spki", format: "der" });
+	return crypto.createHash("sha256").update(spki).digest("base64");
 }
 
 // ---------------------------------------------------------------------------
-// Browser restart
+// Browser launch
 // ---------------------------------------------------------------------------
 
 function confirm(question: string): Promise<boolean> {
@@ -199,61 +153,72 @@ const EDGE_PATHS_WIN = [
 	"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
 ];
 
-const BROWSER_CONFIG = {
-	chrome: {
-		mac: { name: "Google Chrome", processName: "Google Chrome" },
-		win: { exe: "chrome.exe", cmd: "start \"\" \"chrome\"" },
-	},
-	edge: {
-		mac: { name: "Microsoft Edge", processName: "Microsoft Edge" },
-		win: { exe: "msedge.exe", cmd: `start "" "${EDGE_PATHS_WIN.find((p) => fs.existsSync(p)) || "msedge"}"` },
-	},
-} as const;
-
 function detectBrowser(): Browser {
-	if (process.platform === "win32") {
-		if (EDGE_PATHS_WIN.some((p) => fs.existsSync(p))) return "edge";
-		return "chrome";
+	try {
+		if (process.platform === "win32") {
+			const out = execSync('reg query "HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice" /v ProgId', { encoding: "utf-8", stdio: "pipe" });
+			if (out.includes("MSEdgeHTM")) return "edge";
+			if (out.includes("ChromeHTML")) return "chrome";
+		} else if (process.platform === "darwin") {
+			const out = execSync("defaults read com.apple.LaunchServices/com.apple.launchservices.secure LSHandlers 2>/dev/null || true", { encoding: "utf-8", stdio: "pipe" });
+			if (out.includes("com.microsoft.edgemac")) return "edge";
+		}
+	} catch {
+		// Fall through to defaults
 	}
 	return "chrome";
 }
 
-async function restartBrowserWithProxy(browser: Browser) {
-	const pacUrl = await servePacFileOverHttp();
-	const config = BROWSER_CONFIG[browser];
-	const label = browser === "edge" ? "Edge" : "Chrome";
+function getBrowserBinary(browser: Browser): string {
+	if (process.platform === "darwin") {
+		const name = browser === "edge" ? "Microsoft Edge" : "Google Chrome";
+		return `/Applications/${name}.app/Contents/MacOS/${name}`;
+	}
+	if (browser === "edge") {
+		return EDGE_PATHS_WIN.find((p) => fs.existsSync(p)) || "msedge";
+	}
+	// Chrome on Windows — check common paths
+	const chromePaths = [
+		"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+		"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+	];
+	return chromePaths.find((p) => fs.existsSync(p)) || "chrome";
+}
 
-	const shouldRestart = await confirm(`Restart ${label} with proxy PAC?`);
-	if (!shouldRestart) {
-		console.log(`Skipping ${label} restart. Launch manually with: --proxy-pac-url="${pacUrl}"`);
+async function launchBrowserWithProxy(port: number, certPem: string, browser: Browser, autoYes = false) {
+	const label = browser === "edge" ? "Edge" : "Chrome";
+	const spki = getSpkiFingerprint(certPem);
+	const dataDir = getBrowserDataDir();
+	const binary = getBrowserBinary(browser);
+
+	const browserArgs = [
+		`--proxy-server=127.0.0.1:${port}`,
+		`--ignore-certificate-errors-spki-list=${spki}`,
+		`--user-data-dir=${dataDir}`,
+	];
+
+	const shouldLaunch = autoYes || await confirm(`Launch ${label} with proxy?`);
+	if (!shouldLaunch) {
+		console.log(`Skipping ${label} launch. Start manually with:\n  "${binary}" ${browserArgs.join(" ")}`);
 		return;
 	}
 
-	if (process.platform === "darwin") {
-		const { name, processName } = config.mac;
-		try {
-			execSync(`osascript -e 'quit app "${name}"'`, { stdio: "pipe" });
-			console.log(`Closing ${label}...`);
-			for (let i = 0; i < 20; i++) {
-				try { execSync(`pgrep -x '${processName}'`, { stdio: "pipe" }); } catch { break; }
-				execSync("sleep 0.5");
-			}
-			execSync(`open -na "${name}" --args --proxy-pac-url="${pacUrl}"`, { stdio: "inherit" });
-			console.log(`Relaunched ${label} with proxy PAC.`);
-		} catch {
-			console.log(`Could not restart ${label} automatically. Launch manually with: --proxy-pac-url="${pacUrl}"`);
+	const fullCmd = `"${binary}" ${browserArgs.join(" ")}`;
+
+	try {
+		if (process.platform === "win32") {
+			// Use schtasks to launch in the interactive desktop session (not Session 0)
+			const taskName = "PCFDevProxyBrowser";
+			execSync(`schtasks /Create /TN "${taskName}" /TR "${fullCmd.replace(/"/g, '\\"')}" /SC ONCE /ST 00:00 /F /RL HIGHEST`, { stdio: "pipe" });
+			execSync(`schtasks /Run /TN "${taskName}"`, { stdio: "pipe" });
+			execSync(`schtasks /Delete /TN "${taskName}" /F`, { stdio: "pipe" });
+		} else {
+			const child = spawn(binary, browserArgs, { detached: true, stdio: "ignore" });
+			child.unref();
 		}
-	} else if (process.platform === "win32") {
-		const { exe, cmd } = config.win;
-		try {
-			execSync(`taskkill /IM ${exe}`, { stdio: "pipe" });
-			console.log(`Closing ${label}...`);
-			execSync("timeout /t 2 /nobreak >nul", { stdio: "pipe", shell: "cmd.exe" });
-			execSync(`${cmd} --proxy-pac-url="${pacUrl}"`, { stdio: "inherit", shell: "cmd.exe" });
-			console.log(`Relaunched ${label} with proxy PAC.`);
-		} catch {
-			console.log(`Could not restart ${label} automatically. Launch manually with: --proxy-pac-url="${pacUrl}"`);
-		}
+		console.log(`Launched ${label} with proxy (isolated profile).`);
+	} catch (err) {
+		console.log(`Could not launch ${label}. Start manually with:\n  ${fullCmd}`);
 	}
 }
 
@@ -261,7 +226,7 @@ async function restartBrowserWithProxy(browser: Browser) {
 // Proxy server
 // ---------------------------------------------------------------------------
 
-async function startProxy(port: number, servingDir: string, controlName: string, browser: Browser) {
+async function startProxy(port: number, servingDir: string, controlName: string, browser: Browser, autoYes = false) {
 	const interceptRe = new RegExp(`${controlName.replace(".", "\\.")}\/([^?]+)`);
 
 	if (!fs.existsSync(servingDir)) {
@@ -270,11 +235,6 @@ async function startProxy(port: number, servingDir: string, controlName: string,
 	}
 
 	const ca = await loadOrCreateCA();
-
-	if (!isCATrusted()) {
-		console.log("CA certificate is not yet trusted by the OS.");
-		trustCA();
-	}
 
 	const server = mockttp.getLocal({
 		https: { key: ca.key, cert: ca.cert },
@@ -326,17 +286,17 @@ async function startProxy(port: number, servingDir: string, controlName: string,
 		_consoleError(...args);
 	};
 
-	writePacFile(port);
-	await restartBrowserWithProxy(browser);
+	await launchBrowserWithProxy(port, ca.cert, browser, autoYes);
 
-	function shutdown() {
+	async function shutdown() {
 		console.log("\nShutting down proxy...");
+		await server.stop();
 		process.exit(0);
 	}
 
 	process.on("exit", () => { console.error = _consoleError; });
-	process.on("SIGINT", shutdown);
-	process.on("SIGTERM", shutdown);
+	process.on("SIGINT", () => { shutdown(); });
+	process.on("SIGTERM", () => { shutdown(); });
 
 	console.log(`\nPCF Dev Proxy running on port ${port}`);
 	console.log(`Intercepting: ${controlName}/*`);
@@ -352,6 +312,7 @@ let port = 8642;
 let dirOverride: string | null = null;
 let controlOverride: string | null = null;
 let browserOverride: Browser | null = null;
+let skipPrompt = false;
 
 for (let i = 0; i < args.length; i++) {
 	if (args[i] === "--port" && args[i + 1]) {
@@ -366,6 +327,7 @@ for (let i = 0; i < args.length; i++) {
 		if (b !== "chrome" && b !== "edge") { console.error(`Unknown browser: ${b}. Use "chrome" or "edge".`); process.exit(1); }
 		browserOverride = b;
 	}
+	else if (args[i] === "--yes" || args[i] === "-y") { skipPrompt = true; }
 	else if (args[i] === "--help" || args[i] === "-h") {
 		const detected = detectControl(CWD);
 		console.log(`PCF Dev Proxy - HTTPS MITM proxy for local PCF development
@@ -404,7 +366,26 @@ if (controlOverride) {
 	console.log(`Auto-detected control: ${controlName}`);
 }
 
-const servingDir = dirOverride || path.join(CWD, "out/controls", constructorName);
+let servingDir: string;
+if (dirOverride) {
+	servingDir = dirOverride;
+} else {
+	const defaultDir = path.join(CWD, "out/controls", constructorName);
+	if (fs.existsSync(defaultDir)) {
+		servingDir = defaultDir;
+	} else {
+		// Fallback: if only one folder in out/controls/, use it
+		const controlsDir = path.join(CWD, "out/controls");
+		const dirs = fs.existsSync(controlsDir)
+			? fs.readdirSync(controlsDir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name)
+			: [];
+		if (dirs.length === 1) {
+			servingDir = path.join(controlsDir, dirs[0]);
+		} else {
+			servingDir = defaultDir;
+		}
+	}
+}
 const browser = browserOverride || detectBrowser();
 
-startProxy(port, servingDir, controlName, browser);
+startProxy(port, servingDir, controlName, browser, skipPrompt);
