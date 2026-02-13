@@ -1,0 +1,41 @@
+{
+	"name": "pcf-dev-proxy",
+	"version": "1.0.0",
+	"description": "HTTPS MITM proxy that intercepts deployed PCF bundle requests and serves local files instead.",
+	"main": "dist/proxy.js",
+	"bin": {
+		"pcf-dev-proxy": "./dist/proxy.js"
+	},
+	"scripts": {
+		"build": "tsc",
+		"prepublishOnly": "npm run build"
+	},
+	"files": [
+		"dist"
+	],
+	"keywords": [
+		"pcf",
+		"powerapps",
+		"component-framework",
+		"dynamics365",
+		"proxy",
+		"mitm",
+		"dev-tools"
+	],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/Kristoffer88/pcf-dev-proxy.git"
+	},
+	"author": "Kristoffer Rasmussen",
+	"dependencies": {
+		"mockttp": "^4.2.1"
+	},
+	"devDependencies": {
+		"@types/node": "^20.10.4",
+		"typescript": "^5.3.3"
+	},
+	"engines": {
+		"node": ">=18"
+	},
+	"license": "MIT"
+}
