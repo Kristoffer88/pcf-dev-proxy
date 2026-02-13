@@ -5,11 +5,10 @@
  * Auto-detects the PCF control name from ControlManifest.Input.xml in the consuming repo.
  *
  * Usage:
- *   npx @pum/pcf-dev-proxy                # Start proxy (auto-detect control from manifest)
- *   npx @pum/pcf-dev-proxy --port 9000    # Custom port
- *   npx @pum/pcf-dev-proxy --control cc_Projectum.PowerRoadmap  # Override control name
- *   npx @pum/pcf-dev-proxy --no-system-proxy  # Don't touch system proxy settings
- *   npx @pum/pcf-dev-proxy --off          # Disable auto-proxy and exit
+ *   npx pcf-dev-proxy                      # Start proxy (auto-detect control from manifest)
+ *   npx pcf-dev-proxy --port 9000          # Custom port
+ *   npx pcf-dev-proxy --control cc_Ns.Ctl  # Override control name
+ *   npx pcf-dev-proxy --browser edge       # Use Edge instead of Chrome
  */
 
 import * as fs from "fs";
@@ -26,12 +25,11 @@ import * as mockttp from "mockttp";
 function findManifest(startDir: string): string | null {
 	let dir = startDir;
 	while (true) {
-		// Look for ControlManifest.Input.xml in any subdirectory
 		const candidates = findManifestFiles(dir);
 		if (candidates.length > 0) return candidates[0];
 
 		const parent = path.dirname(dir);
-		if (parent === dir) break; // reached filesystem root
+		if (parent === dir) break;
 		dir = parent;
 	}
 	return null;
@@ -59,19 +57,17 @@ function findManifestFiles(dir: string): string[] {
 interface ControlInfo {
 	namespace: string;
 	constructor: string;
-	controlName: string; // e.g. "cc_Projectum.PowerRoadmap"
+	controlName: string;
 }
 
 function parseManifest(manifestPath: string): ControlInfo | null {
 	const xml = fs.readFileSync(manifestPath, "utf-8");
 	const match = xml.match(/<control\s+[^>]*namespace="([^"]+)"[^>]*constructor="([^"]+)"/);
 	if (!match) return null;
-	const namespace = match[1];
-	const constructor = match[2];
 	return {
-		namespace,
-		constructor,
-		controlName: `cc_${namespace}.${constructor}`,
+		namespace: match[1],
+		constructor: match[2],
+		controlName: `cc_${match[1]}.${match[2]}`,
 	};
 }
 
@@ -99,7 +95,7 @@ const PAC_FILE_PATH = path.join(CACHE_DIR, "proxy.pac");
 
 const CA_NAME = "PCF Dev Proxy CA";
 
-const WIN_INET_SETTINGS = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+type Browser = "chrome" | "edge";
 
 // ---------------------------------------------------------------------------
 // PAC file
@@ -115,8 +111,6 @@ function writePacFile(port: number) {
 `);
 }
 
-let _pacServer: http.Server | null = null;
-
 function servePacFileOverHttp(): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const srv = http.createServer((_req, res) => {
@@ -127,101 +121,9 @@ function servePacFileOverHttp(): Promise<string> {
 		srv.listen(0, "127.0.0.1", () => {
 			const addr = srv.address();
 			if (!addr || typeof addr === "string") return reject(new Error("Failed to bind PAC server"));
-			_pacServer = srv;
 			resolve(`http://127.0.0.1:${addr.port}/proxy.pac`);
 		});
 	});
-}
-
-// ---------------------------------------------------------------------------
-// System proxy -- macOS
-// ---------------------------------------------------------------------------
-
-function macGetActiveNetworkService(): string | null {
-	try {
-		const routeOutput = execSync("route -n get default 2>/dev/null", { encoding: "utf-8" });
-		const ifaceMatch = routeOutput.match(/interface:\s*(\S+)/);
-		if (!ifaceMatch) return null;
-		const iface = ifaceMatch[1];
-
-		const hwPorts = execSync("networksetup -listallhardwareports", { encoding: "utf-8" });
-		const sections = hwPorts.split(/(?=Hardware Port:)/);
-		for (const section of sections) {
-			if (section.includes(`Device: ${iface}`)) {
-				const nameMatch = section.match(/Hardware Port:\s*(.+)/);
-				if (nameMatch) return nameMatch[1].trim();
-			}
-		}
-	} catch {
-		// ignore
-	}
-	return null;
-}
-
-let _macNetworkService: string | null = null;
-
-function macEnableAutoproxy(port: number): boolean {
-	_macNetworkService = macGetActiveNetworkService();
-	if (!_macNetworkService) return false;
-	writePacFile(port);
-	const pacUrl = "file://" + PAC_FILE_PATH;
-	execSync(`networksetup -setautoproxyurl "${_macNetworkService}" "${pacUrl}"`, { stdio: "inherit" });
-	console.log(`Auto-proxy enabled on "${_macNetworkService}" (PAC with DIRECT fallback)`);
-	return true;
-}
-
-function macDisableAutoproxy() {
-	const svc = _macNetworkService || macGetActiveNetworkService();
-	if (!svc) return;
-	try {
-		execSync(`networksetup -setautoproxystate "${svc}" off`, { stdio: "inherit" });
-	} catch { /* best-effort */ }
-}
-
-// ---------------------------------------------------------------------------
-// System proxy -- Windows
-// ---------------------------------------------------------------------------
-
-async function winEnableAutoproxy(port: number): Promise<boolean> {
-	try {
-		writePacFile(port);
-		const pacUrl = await servePacFileOverHttp();
-		execSync(`reg add "${WIN_INET_SETTINGS}" /v AutoConfigURL /t REG_SZ /d "${pacUrl}" /f`, { stdio: "inherit" });
-		winRefreshProxy();
-		console.log(`Auto-proxy enabled (PAC at ${pacUrl} with DIRECT fallback)`);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-function winDisableAutoproxy() {
-	try {
-		execSync(`reg delete "${WIN_INET_SETTINGS}" /v AutoConfigURL /f 2>nul`, { stdio: "inherit" });
-		winRefreshProxy();
-	} catch { /* best-effort */ }
-	if (_pacServer) { _pacServer.close(); _pacServer = null; }
-}
-
-function winRefreshProxy() {
-	try {
-		execSync(`powershell -NoProfile -Command "Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public class WI { [DllImport(\\"wininet.dll\\")] public static extern bool InternetSetOption(IntPtr h, int o, IntPtr b, int l); }'; [WI]::InternetSetOption([IntPtr]::Zero,39,[IntPtr]::Zero,0); [WI]::InternetSetOption([IntPtr]::Zero,37,[IntPtr]::Zero,0)"`, { stdio: "pipe" });
-	} catch { /* best-effort */ }
-}
-
-// ---------------------------------------------------------------------------
-// System proxy -- cross-platform
-// ---------------------------------------------------------------------------
-
-async function enableSystemProxy(port: number): Promise<boolean> {
-	if (process.platform === "darwin") return macEnableAutoproxy(port);
-	if (process.platform === "win32") return winEnableAutoproxy(port);
-	return false;
-}
-
-function disableSystemProxy() {
-	if (process.platform === "darwin") macDisableAutoproxy();
-	else if (process.platform === "win32") winDisableAutoproxy();
 }
 
 // ---------------------------------------------------------------------------
@@ -279,7 +181,7 @@ function trustCA() {
 }
 
 // ---------------------------------------------------------------------------
-// Chrome restart
+// Browser restart
 // ---------------------------------------------------------------------------
 
 function confirm(question: string): Promise<boolean> {
@@ -292,37 +194,66 @@ function confirm(question: string): Promise<boolean> {
 	});
 }
 
-async function restartChromeWithProxy() {
-	const chromePacUrl = await servePacFileOverHttp();
+const BROWSER_CONFIG = {
+	chrome: {
+		mac: { name: "Google Chrome", processName: "Google Chrome" },
+		win: { exe: "chrome.exe", start: "chrome" },
+	},
+	edge: {
+		mac: { name: "Microsoft Edge", processName: "Microsoft Edge" },
+		win: { exe: "msedge.exe", start: "msedge" },
+	},
+} as const;
 
-	const shouldRestart = await confirm("Restart Chrome with proxy PAC?");
+function detectBrowser(): Browser {
+	if (process.platform === "win32") {
+		// Prefer Edge on Windows (most Dynamics 365 users use Edge)
+		try {
+			execSync("where msedge", { stdio: "pipe" });
+			return "edge";
+		} catch {
+			return "chrome";
+		}
+	}
+	// Prefer Chrome on macOS
+	return "chrome";
+}
+
+async function restartBrowserWithProxy(browser: Browser) {
+	const pacUrl = await servePacFileOverHttp();
+	const config = BROWSER_CONFIG[browser];
+	const label = browser === "edge" ? "Edge" : "Chrome";
+
+	const shouldRestart = await confirm(`Restart ${label} with proxy PAC?`);
 	if (!shouldRestart) {
-		console.log("Skipping Chrome restart. You may need to restart it manually with the proxy PAC.");
+		console.log(`Skipping ${label} restart. Launch manually with: --proxy-pac-url="${pacUrl}"`);
 		return;
 	}
 
 	if (process.platform === "darwin") {
+		const { name, processName } = config.mac;
 		try {
-			execSync(`osascript -e 'quit app "Google Chrome"'`, { stdio: "pipe" });
-			console.log("Closing Chrome...");
+			execSync(`osascript -e 'quit app "${name}"'`, { stdio: "pipe" });
+			console.log(`Closing ${label}...`);
 			for (let i = 0; i < 20; i++) {
-				try { execSync("pgrep -x 'Google Chrome'", { stdio: "pipe" }); } catch { break; }
+				try { execSync(`pgrep -x '${processName}'`, { stdio: "pipe" }); } catch { break; }
 				execSync("sleep 0.5");
 			}
-			execSync(`open -na "Google Chrome" --args --proxy-pac-url="${chromePacUrl}"`, { stdio: "inherit" });
-			console.log("Relaunched Chrome with proxy PAC file.");
+			execSync(`open -na "${name}" --args --proxy-pac-url="${pacUrl}"`, { stdio: "inherit" });
+			console.log(`Relaunched ${label} with proxy PAC.`);
 		} catch {
-			console.log("Could not restart Chrome automatically. Restart Chrome manually.");
+			console.log(`Could not restart ${label} automatically. Launch manually with: --proxy-pac-url="${pacUrl}"`);
 		}
 	} else if (process.platform === "win32") {
+		const { exe, start } = config.win;
 		try {
-			execSync(`taskkill /IM chrome.exe`, { stdio: "pipe" });
-			console.log("Closing Chrome...");
+			execSync(`taskkill /IM ${exe}`, { stdio: "pipe" });
+			console.log(`Closing ${label}...`);
 			execSync("timeout /t 2 /nobreak >nul", { stdio: "pipe", shell: "cmd.exe" });
-			execSync(`start "" "chrome" --proxy-pac-url="${chromePacUrl}"`, { stdio: "inherit", shell: "cmd.exe" });
-			console.log("Relaunched Chrome with proxy PAC file.");
+			execSync(`start "" "${start}" --proxy-pac-url="${pacUrl}"`, { stdio: "inherit", shell: "cmd.exe" });
+			console.log(`Relaunched ${label} with proxy PAC.`);
 		} catch {
-			console.log("Could not restart Chrome automatically. Restart Chrome manually.");
+			console.log(`Could not restart ${label} automatically. Launch manually with: --proxy-pac-url="${pacUrl}"`);
 		}
 	}
 }
@@ -331,7 +262,7 @@ async function restartChromeWithProxy() {
 // Proxy server
 // ---------------------------------------------------------------------------
 
-async function startProxy(port: number, servingDir: string, controlName: string, useSystemProxy: boolean) {
+async function startProxy(port: number, servingDir: string, controlName: string, browser: Browser) {
 	const interceptRe = new RegExp(`${controlName.replace(".", "\\.")}\/([^?]+)`);
 
 	if (!fs.existsSync(servingDir)) {
@@ -396,25 +327,15 @@ async function startProxy(port: number, servingDir: string, controlName: string,
 		_consoleError(...args);
 	};
 
-	let proxyEnabled = false;
-	if (useSystemProxy) {
-		proxyEnabled = await enableSystemProxy(port);
-		if (!proxyEnabled) {
-			console.log("Could not auto-configure system proxy. Configure manually: 127.0.0.1:" + port);
-		}
-	}
-
-	await restartChromeWithProxy();
+	writePacFile(port);
+	await restartBrowserWithProxy(browser);
 
 	function shutdown() {
 		console.log("\nShutting down proxy...");
 		process.exit(0);
 	}
 
-	process.on("exit", () => {
-		console.error = _consoleError;
-		if (proxyEnabled) disableSystemProxy();
-	});
+	process.on("exit", () => { console.error = _consoleError; });
 	process.on("SIGINT", shutdown);
 	process.on("SIGTERM", shutdown);
 
@@ -431,8 +352,7 @@ const args = process.argv.slice(2);
 let port = 8642;
 let dirOverride: string | null = null;
 let controlOverride: string | null = null;
-let useSystemProxy = process.platform === "darwin" || process.platform === "win32";
-let offMode = false;
+let browserOverride: Browser | null = null;
 
 for (let i = 0; i < args.length; i++) {
 	if (args[i] === "--port" && args[i + 1]) {
@@ -442,8 +362,11 @@ for (let i = 0; i < args.length; i++) {
 	}
 	else if (args[i] === "--dir" && args[i + 1]) { dirOverride = args[++i]; }
 	else if (args[i] === "--control" && args[i + 1]) { controlOverride = args[++i]; }
-	else if (args[i] === "--no-system-proxy") useSystemProxy = false;
-	else if (args[i] === "--off") offMode = true;
+	else if (args[i] === "--browser" && args[i + 1]) {
+		const b = args[++i].toLowerCase();
+		if (b !== "chrome" && b !== "edge") { console.error(`Unknown browser: ${b}. Use "chrome" or "edge".`); process.exit(1); }
+		browserOverride = b;
+	}
 	else if (args[i] === "--help" || args[i] === "-h") {
 		const detected = detectControl(CWD);
 		console.log(`PCF Dev Proxy - HTTPS MITM proxy for local PCF development
@@ -451,22 +374,16 @@ for (let i = 0; i < args.length; i++) {
 Usage: pcf-dev-proxy [options]
 
 Options:
-  --port <number>     Proxy port (default: 8642)
-  --dir <path>        Directory to serve files from (auto-detected from manifest)
-  --control <name>    Override control name (e.g. cc_Projectum.PowerRoadmap)
-  --no-system-proxy   Don't auto-configure system proxy
-  --off               Disable auto-proxy configuration and exit
-  -h, --help          Show this help
+  --port <number>       Proxy port (default: 8642)
+  --dir <path>          Directory to serve files from (auto-detected from manifest)
+  --control <name>      Override control name (e.g. cc_Projectum.PowerRoadmap)
+  --browser <name>      Browser to use: chrome, edge (default: auto-detect)
+  -h, --help            Show this help
 
-Auto-detected: ${detected ? `${detected.controlName} (from ${detected.manifestDir})` : "no manifest found"}`);
+Auto-detected: ${detected ? `${detected.controlName} (from ${detected.manifestDir})` : "no manifest found"}
+Browser: ${browserOverride || detectBrowser()}`);
 		process.exit(0);
 	}
-}
-
-if (offMode) {
-	disableSystemProxy();
-	console.log("Auto-proxy disabled.");
-	process.exit(0);
 }
 
 // Resolve control name and serving directory
@@ -489,5 +406,6 @@ if (controlOverride) {
 }
 
 const servingDir = dirOverride || path.join(CWD, "out/controls", constructorName);
+const browser = browserOverride || detectBrowser();
 
-startProxy(port, servingDir, controlName, useSystemProxy);
+startProxy(port, servingDir, controlName, browser);
