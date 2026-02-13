@@ -1,16 +1,14 @@
 # pcf-dev-proxy
 
-> HTTPS proxy that intercepts deployed PCF bundle requests from Dynamics 365 and serves your local build instead. Zero config.
+HTTPS proxy that intercepts deployed PCF bundle requests from Dynamics 365 and serves your local build instead.
 
-Skip the `pac pcf push` → wait → refresh cycle. Run `npx pcf-dev-proxy`, save your code, refresh the browser — see changes instantly against a live Dynamics 365 environment.
-
-## Try it
+## Quick start
 
 ```bash
 npx pcf-dev-proxy
 ```
 
-That's it. It reads your `ControlManifest.Input.xml`, figures out the control name, and starts intercepting.
+Reads your `ControlManifest.Input.xml`, detects the control name, and starts intercepting.
 
 ```
 Auto-detected control: cc_Contoso.MyControl
@@ -26,51 +24,19 @@ Serving from: out/controls/MyControl/
   200  bundle.js.map (1204 KB)
 ```
 
-## Why
+Or install as a devDependency:
 
-The standard PCF development loop is painfully slow:
+```bash
+npm install --save-dev pcf-dev-proxy
+```
 
-1. Edit code
-2. `npm run build`
-3. `pac pcf push` (minutes)
-4. Hard refresh browser
-5. Repeat
-
-With `pcf-dev-proxy`, step 3 disappears. Your local `out/controls/` directory is served directly to the browser.
-
-### vs. Fiddler AutoResponder
-
-Fiddler is the [officially recommended approach](https://learn.microsoft.com/en-us/power-apps/developer/component-framework/debugging-custom-controls), but:
-
-- Windows only (Fiddler Classic)
-- System-wide proxy breaks Teams, triggers auth dialogs
-- Manual regex rule setup per control
-- Manual HTTPS certificate installation
-
-### vs. Requestly
-
-- Free tier limited to 3 rules
-- $8-23/month for commercial use
-- Manual rule configuration per control
-
-### vs. pcf-cli-proxy-tools
-
-- Requires separate Python/mitmproxy installation
-- Manual `.env` configuration (CRM URL, Chrome path, ports)
-
-### vs. Chrome DevTools Overrides
-
-- Manual per-file setup, doesn't persist across sessions
-
-## Features
-
-- **Zero config** — auto-detects control name from `ControlManifest.Input.xml`
-- **No external dependencies** — pure Node.js, everything installs via npm
-- **Selective proxying** — PAC file routes only `*.dynamics.com` through the proxy; everything else is DIRECT
-- **Auto CA trust** — generates and trusts the certificate on macOS and Windows
-- **Source map support** — appends `sourceMappingURL` to JS responses when `.map` files exist
-- **Chrome restart** — relaunches Chrome with the proxy PAC (with confirmation prompt)
-- **Safe fallback** — if the proxy crashes, the PAC file falls back to DIRECT. No broken internet.
+```json
+{
+  "scripts": {
+    "proxy": "pcf-dev-proxy"
+  }
+}
+```
 
 ## How it works
 
@@ -87,46 +53,15 @@ Chrome (--proxy-pac-url) → PAC file (only *.dynamics.com) → MITM proxy (port
 5. Starts an HTTPS MITM proxy that intercepts matching bundle requests
 6. Restarts Chrome with `--proxy-pac-url` pointing to the PAC
 
-## Install
+## CLI options
 
 ```bash
-# Run directly (no install needed)
-npx pcf-dev-proxy
-
-# Or add to your project
-npm install --save-dev pcf-dev-proxy
-```
-
-If installed as a devDependency, add to `package.json`:
-
-```json
-{
-  "scripts": {
-    "proxy": "pcf-dev-proxy"
-  }
-}
-```
-
-## Usage
-
-```bash
-# Start with auto-detection (most common)
-npx pcf-dev-proxy
-
-# Custom port
-npx pcf-dev-proxy --port 9000
-
-# Override control name
-npx pcf-dev-proxy --control cc_Contoso.MyControl
-
-# Custom serving directory
-npx pcf-dev-proxy --dir ./my-build-output
-
-# Don't configure system proxy
-npx pcf-dev-proxy --no-system-proxy
-
-# Disable proxy and exit
-npx pcf-dev-proxy --off
+npx pcf-dev-proxy                              # auto-detect everything
+npx pcf-dev-proxy --port 9000                  # custom port
+npx pcf-dev-proxy --control cc_Contoso.MyCtrl  # override control name
+npx pcf-dev-proxy --dir ./my-build-output      # custom serving directory
+npx pcf-dev-proxy --no-system-proxy            # don't configure system proxy
+npx pcf-dev-proxy --off                        # disable proxy and exit
 ```
 
 ## Typical workflow
@@ -148,16 +83,6 @@ Save a file → webpack rebuilds → refresh browser → see changes against liv
 | Auto-proxy (PAC) | networksetup | Registry |
 | CA trust | Keychain (sudo) | certutil |
 | Chrome restart | osascript | taskkill |
-
-## First run
-
-On first run, the proxy will:
-
-1. Generate a CA certificate (stored in `.cache/proxy-ca.pem`)
-2. Ask for `sudo` (macOS) or admin elevation (Windows) to trust it
-3. Prompt before restarting Chrome
-
-The CA is persisted — subsequent runs skip steps 1-2.
 
 ## Requirements
 
