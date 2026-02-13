@@ -194,28 +194,27 @@ function confirm(question: string): Promise<boolean> {
 	});
 }
 
+const EDGE_PATHS_WIN = [
+	"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+	"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+];
+
 const BROWSER_CONFIG = {
 	chrome: {
 		mac: { name: "Google Chrome", processName: "Google Chrome" },
-		win: { exe: "chrome.exe", start: "chrome" },
+		win: { exe: "chrome.exe", cmd: "start \"\" \"chrome\"" },
 	},
 	edge: {
 		mac: { name: "Microsoft Edge", processName: "Microsoft Edge" },
-		win: { exe: "msedge.exe", start: "msedge" },
+		win: { exe: "msedge.exe", cmd: `start "" "${EDGE_PATHS_WIN.find((p) => fs.existsSync(p)) || "msedge"}"` },
 	},
 } as const;
 
 function detectBrowser(): Browser {
 	if (process.platform === "win32") {
-		// Prefer Edge on Windows (most Dynamics 365 users use Edge)
-		try {
-			execSync("where msedge", { stdio: "pipe" });
-			return "edge";
-		} catch {
-			return "chrome";
-		}
+		if (EDGE_PATHS_WIN.some((p) => fs.existsSync(p))) return "edge";
+		return "chrome";
 	}
-	// Prefer Chrome on macOS
 	return "chrome";
 }
 
@@ -245,12 +244,12 @@ async function restartBrowserWithProxy(browser: Browser) {
 			console.log(`Could not restart ${label} automatically. Launch manually with: --proxy-pac-url="${pacUrl}"`);
 		}
 	} else if (process.platform === "win32") {
-		const { exe, start } = config.win;
+		const { exe, cmd } = config.win;
 		try {
 			execSync(`taskkill /IM ${exe}`, { stdio: "pipe" });
 			console.log(`Closing ${label}...`);
 			execSync("timeout /t 2 /nobreak >nul", { stdio: "pipe", shell: "cmd.exe" });
-			execSync(`start "" "${start}" --proxy-pac-url="${pacUrl}"`, { stdio: "inherit", shell: "cmd.exe" });
+			execSync(`${cmd} --proxy-pac-url="${pacUrl}"`, { stdio: "inherit", shell: "cmd.exe" });
 			console.log(`Relaunched ${label} with proxy PAC.`);
 		} catch {
 			console.log(`Could not restart ${label} automatically. Launch manually with: --proxy-pac-url="${pacUrl}"`);
