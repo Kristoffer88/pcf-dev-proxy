@@ -52,7 +52,11 @@ export const HMR_CLIENT_SOURCE = `;(function () {
   }
 
   function removeInstance(entry, instance) {
-    entry.instances = entry.instances.filter(function (x) { return x.instance !== instance; });
+    var result = [];
+    for (var i = 0; i < entry.instances.length; i++) {
+      if (entry.instances[i].instance !== instance) result.push(entry.instances[i]);
+    }
+    entry.instances = result;
   }
 
   function patchCtor(shortName, Ctor) {
@@ -83,7 +87,6 @@ export const HMR_CLIENT_SOURCE = `;(function () {
       if (originalDestroy) {
         return originalDestroy.apply(this, arguments);
       }
-      return undefined;
     };
 
     proto.__pcfHmrWrapped = true;
@@ -111,7 +114,6 @@ export const HMR_CLIENT_SOURCE = `;(function () {
       var result = originalRegister.apply(this, arguments);
 
       try {
-        var shortName = shortNameFromControl(name);
         var resolved = ctor;
         if (!resolved && typeof cf.getRegisteredControl === "function") {
           resolved = cf.getRegisteredControl(shortName);
@@ -223,7 +225,8 @@ export const HMR_CLIENT_SOURCE = `;(function () {
         var instances = entry.instances.slice();
         var total = instances.length;
 
-        instances.forEach(function (record) {
+        for (var ri = 0; ri < instances.length; ri++) {
+          var record = instances[ri];
           try {
             if (record.instance && typeof record.instance.destroy === "function") {
               record.instance.destroy();
@@ -237,7 +240,7 @@ export const HMR_CLIENT_SOURCE = `;(function () {
               record.container.innerHTML = "";
             }
           } catch (_) {}
-        });
+        }
 
         var oldUrl = new URL(script.src, window.location.href);
         oldUrl.searchParams.set("_hmr", String(Date.now()));

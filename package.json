@@ -1,7 +1,7 @@
 {
 	"name": "pcf-dev-proxy",
-	"version": "1.1.0",
-	"description": "HTTPS MITM proxy that intercepts deployed PCF bundle requests and serves local files instead.",
+	"version": "3.1.0",
+	"description": "HTTPS MITM proxy that intercepts deployed PCF bundle requests and serves local files with hot module reload.",
 	"main": "dist/proxy.js",
 	"bin": {
 		"pcf-dev-proxy": "./dist/proxy.js"

@@ -19,5 +19,8 @@
 # Visual Studio cache/options directory
 /.vs
 
+# proxy cache (CA certs)
+.cache/
+
 # macos
 .DS_Store

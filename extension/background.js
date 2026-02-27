@@ -33,16 +33,6 @@ function warn(...args) {
   console.warn(PREFIX, ...args);
 }
 
-function postAck(payload) {
-  return fetch(`http://127.0.0.1:${wsPort}/ack`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  }).catch((error) => {
-    warn("ACK post failed:", error);
-  });
-}
-
 function sendToDynamicsTabs(message) {
   chrome.tabs.query({ url: ["https://*.dynamics.com/*"] }, (tabs) => {
     for (const tab of tabs) {
@@ -143,10 +133,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       time: new Date().toISOString()
     };
     persistState();
-    postAck(message.payload)
-      .then(() => sendResponse({ ok: true }))
-      .catch(() => sendResponse({ ok: false }));
-    return true;
+    sendResponse({ ok: true });
+    return;
   }
 
   if (message.type === "pcf-hmr:get-status") {

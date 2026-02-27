@@ -22,10 +22,10 @@ npx pcf-dev-proxy --hot --yes
 Hot mode adds:
 
 - local HMR control plane on `127.0.0.1` (default port `8643`)
-- Chrome extension bridge (auto-loaded when proxy launches Chrome)
+- direct WebSocket from page to control plane (no extension required)
+- optional Chrome extension bridge as fallback
 - in-page runtime instrumentation for PCF instance swap
-
-No CSP stripping is used.
+- CSP header stripping on passthrough responses (hot mode only)
 
 ### Trigger reload from your build pipeline
 
@@ -111,7 +111,7 @@ npx pcf-dev-proxy reload --control cc_Contoso.MyControl --trigger pcf-start
 
 - No reload applied: check `GET /last-ack` for latest runtime status.
 - ACK timeout: ensure Dataverse tab is open in the Chrome instance launched by the proxy.
-- Browser mismatch: hot mode currently supports Chrome only.
+- Browser mismatch: hot mode proxy launch currently supports Chrome only (direct WS works in any browser).
 - Multiple rapid builds: queue is latest-wins per control; only newest pending reload is applied.
 
 ## Requirements

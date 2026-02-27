@@ -229,19 +229,9 @@ function getBrowserBinary(browser: Browser): string {
 	return chromePaths.find((p) => fs.existsSync(p)) || "chrome";
 }
 
-function resolveExtensionPath(): string {
-	const extensionPath = path.resolve(__dirname, "..", "extension");
-	if (!fs.existsSync(path.join(extensionPath, "manifest.json"))) {
-		throw new Error(`Hot mode requires extension files at ${extensionPath}`);
-	}
-	return extensionPath;
-}
-
 function isBrowserAlreadyRunning(dataDir: string): boolean {
 	try {
 		if (process.platform === "win32") {
-			const out = execSync("tasklist /FO CSV /NH", { encoding: "utf-8", stdio: "pipe" });
-			// On Windows we can't easily check args via tasklist; check the lock file instead.
 			// Chrome holds a lock on <dataDir>/lockfile while running.
 			const lockFile = path.join(dataDir, "lockfile");
 			return fs.existsSync(lockFile);
@@ -301,7 +291,7 @@ async function launchBrowserWithProxy(
 		}
 		console.log(`Launched ${label} with proxy (isolated profile).`);
 		if (hotMode) {
-			console.log("Hot mode enabled: Chrome extension bridge loaded.");
+			console.log("Hot mode enabled: HMR control plane active.");
 		}
 	} catch {
 		console.log(`Could not launch ${label}. Start manually with:\n  ${fullCmd}`);
@@ -402,11 +392,7 @@ export function createHmrControlPlane(wsPort: number, fallbackControlName: strin
 	let nextId = 1;
 
 	function toAckMap(): Record<string, ReloadAck> {
-		const output: Record<string, ReloadAck> = {};
-		for (const [key, value] of lastAckByControl.entries()) {
-			output[key] = value;
-		}
-		return output;
+		return Object.fromEntries(lastAckByControl.entries());
 	}
 
 	function getQueue(controlName: string): ControlQueueState {
@@ -632,7 +618,7 @@ function watchBundleAndEnqueue(
 // ---------------------------------------------------------------------------
 
 async function startProxy(options: ProxyOptions): Promise<void> {
-	const interceptRe = new RegExp(`${options.controlName.replace(".", "\\.")}\/([^?]+)`);
+	const interceptRe = new RegExp(`${options.controlName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\/([^?]+)`);
 
 	if (!fs.existsSync(options.servingDir)) {
 		console.error(`Serving directory does not exist: ${options.servingDir}\nRun your build command first.`);

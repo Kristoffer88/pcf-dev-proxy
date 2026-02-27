@@ -12,7 +12,7 @@ cd example/DevProxySample
 npx pcf-scripts start watch
 
 # Terminal 2: proxy WITHOUT --watch-bundle
-node dist/proxy.js \
+npx pcf-dev-proxy \
   --control "cc_Example.DevProxySample" \
   --dir "example/DevProxySample/out/controls/DevProxySample" \
   --hot -y --browser chrome
@@ -46,7 +46,7 @@ Every save triggers an immediate reload — instant feedback for VS Code editing
 
 ```bash
 # Same as above but ADD --watch-bundle
-node dist/proxy.js \
+npx pcf-dev-proxy \
   --control "cc_Example.DevProxySample" \
   --dir "example/DevProxySample/out/controls/DevProxySample" \
   --hot --watch-bundle -y --browser chrome
