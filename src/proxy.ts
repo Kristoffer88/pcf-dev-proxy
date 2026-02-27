@@ -739,7 +739,7 @@ async function startProxy(options: ProxyOptions): Promise<void> {
 	console.log(`Serving from: ${options.servingDir}`);
 	if (options.hotMode) {
 		console.log(`Hot mode: ON (control plane http://127.0.0.1:${options.wsPort})`);
-		console.log(`Hot fallback watcher: ${options.watchBundle ? "ON" : "OFF"}`);
+		console.log(`Watch-bundle auto-reload: ${options.watchBundle ? "ON" : "OFF"}`);
 	} else {
 		console.log("Hot mode: OFF");
 	}

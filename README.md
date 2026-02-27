@@ -1,123 +1,155 @@
 # pcf-dev-proxy
 
-HTTPS MITM proxy for PCF development against live Dataverse pages.
-
-By default it intercepts control assets and serves local build output.
-With `--hot`, it also enables deterministic in-place PCF control hot-reload (no full page refresh).
+HTTPS MITM proxy with deterministic hot reload for PCF controls on live Dataverse pages.
 
 ## Quick start
 
 ```bash
-npx pcf-dev-proxy
+# Terminal 1: webpack watch (incremental rebuilds)
+npx pcf-scripts start watch
+
+# Terminal 2: proxy with hot reload
+npx pcf-dev-proxy --hot -y
 ```
 
-This auto-detects `ControlManifest.Input.xml`, resolves `cc_<namespace>.<constructor>`, and serves files from `out/controls/<constructor>`.
+Auto-detects `ControlManifest.Input.xml`, resolves `cc_<namespace>.<constructor>`, and serves files from `out/controls/<constructor>`.
 
-## Hot mode (Chrome, no full page reload)
+Default ports: `8642` (proxy), `8643` (control plane).
+
+## Agent workflow
+
+Edit source → webpack rebuilds (~200ms) → POST /reload → GET /last-ack → verify success.
 
 ```bash
-npx pcf-dev-proxy --hot --yes
+# 1. Edit files (webpack auto-rebuilds in background)
+
+# 2. Trigger reload
+curl -s -X POST http://127.0.0.1:8643/reload \
+  -H "Content-Type: application/json" \
+  -d '{"controlName":"cc_Contoso.MyControl","trigger":"agent"}'
+# → {"accepted":true,"id":"r-1234567890-1"}
+
+# 3. Verify
+curl -s http://127.0.0.1:8643/last-ack
+# → {"cc_Contoso.MyControl":{"status":"success","durationMs":62,...}}
 ```
 
-Hot mode adds:
+Hot reload cycle: ~60-80ms. No full page refresh.
 
-- local HMR control plane on `127.0.0.1` (default port `8643`)
-- direct WebSocket from page to control plane
-- in-page runtime instrumentation for PCF instance swap
-- CSP header stripping on passthrough responses (hot mode only)
-
-### Trigger reload from your build pipeline
-
-Primary workflow is explicit trigger from build completion:
-
-```bash
-npx pcf-dev-proxy reload \
-  --control cc_Contoso.MyControl \
-  --trigger pcf-start \
-  --build-id "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-```
-
-Optional fallback watcher:
-
-```bash
-npx pcf-dev-proxy --hot --watch-bundle
-```
+The queue is latest-wins per control — rapid consecutive POSTs coalesce to the newest pending reload (no reload spam).
 
 ## Control plane API
 
-When hot mode is enabled (`--hot`):
+Bound to `127.0.0.1:8643` (override with `--ws-port`).
 
-- `GET /health`
-- `POST /reload`
-- `POST /ack`
-- `GET /last-ack`
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | /health | Liveness check |
+| POST | /reload | Enqueue a hot reload |
+| POST | /ack | Runtime acknowledgement (internal) |
+| GET | /last-ack | Latest ACK per control |
+| WS | /ws | Real-time reload/ack stream |
 
-Example reload payload:
-
-```json
-{ "controlName": "cc_Contoso.MyControl", "buildId": "2026-02-27T12:34:56.789Z", "trigger": "pcf-start" }
-```
-
-Example ACK payload from runtime:
+### POST /reload
 
 ```json
-{ "id": "r-123", "controlName": "cc_Contoso.MyControl", "buildId": "2026-02-27T12:34:56.789Z", "status": "success", "instancesTotal": 2, "instancesReloaded": 2, "durationMs": 184 }
+{
+  "controlName": "cc_Contoso.MyControl",
+  "buildId": "2026-02-27T12:34:56.789Z",
+  "trigger": "agent",
+  "changedFiles": ["src/index.ts"]
+}
 ```
+
+`controlName` defaults to the auto-detected control. `buildId` defaults to ISO timestamp. `trigger` defaults to `"manual"`. `changedFiles` is optional metadata.
+
+Response: `{"accepted": true, "id": "r-..."}`.
+
+### GET /last-ack
+
+Returns a map keyed by control name:
+
+```json
+{
+  "cc_Contoso.MyControl": {
+    "id": "r-123",
+    "controlName": "cc_Contoso.MyControl",
+    "buildId": "2026-02-27T12:34:56.789Z",
+    "status": "success",
+    "instancesTotal": 2,
+    "instancesReloaded": 2,
+    "durationMs": 184
+  }
+}
+```
+
+`status` is `"success"`, `"partial"`, or `"failed"`. On timeout (15s), status is `"failed"` with `error: "Timed out waiting for runtime ACK"`.
 
 ## CLI
 
-```bash
-# start proxy
+```
 npx pcf-dev-proxy [options]
-
-# enqueue a reload (no proxy startup)
 npx pcf-dev-proxy reload --control <name> [options]
 ```
 
-Options:
+### Proxy options
 
-- `--port <number>` Proxy port (default `8642`)
-- `--ws-port <number>` HMR control plane port (default `8643`)
-- `--dir <path>` Directory to serve files from
-- `--control <name>` Override control name
-- `--browser <name>` `chrome` or `edge` (auto-detected)
-- `--hot` Enable hot mode (Chrome only)
-- `--watch-bundle` Watch `bundle.js` and enqueue reload (hot mode only)
-- `-y, --yes` Skip launch prompt
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--hot` | off | Enable hot reload (Chrome only) |
+| `-y, --yes` | off | Skip browser launch prompt |
+| `--port <n>` | `8642` | Proxy port |
+| `--ws-port <n>` | `8643` | Control plane port |
+| `--dir <path>` | auto-detected | Directory to serve files from |
+| `--control <name>` | auto-detected | Override control name |
+| `--browser <name>` | auto-detected | `chrome` or `edge` |
+| `--watch-bundle` | off | Auto-reload on bundle.js change (human mode) |
 
-Reload subcommand options:
+### Reload subcommand
 
-- `--ws-port <number>` Control plane port
-- `--control <name>` Required control name
-- `--build-id <id>` Build identifier
-- `--trigger <source>` Trigger label
-- `--changed-files <csv>` Optional changed files metadata
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--control <name>` | required | Control name |
+| `--ws-port <n>` | `8643` | Control plane port |
+| `--build-id <id>` | ISO timestamp | Build identifier |
+| `--trigger <source>` | `"manual"` | Trigger label |
+| `--changed-files <csv>` | — | Changed files metadata |
 
-## Typical PCF workflow
+## Human mode (optional)
+
+For interactive development without an agent, add `--watch-bundle` to auto-reload when webpack writes `bundle.js`:
 
 ```bash
-# terminal 1
-pcf-start
-
-# terminal 2
-npx pcf-dev-proxy --hot
-
-# after successful build
-npx pcf-dev-proxy reload --control cc_Contoso.MyControl --trigger pcf-start
+npx pcf-dev-proxy --hot --watch-bundle -y
 ```
+
+Monitors the serving directory with a 500ms debounce, then enqueues a reload automatically. Flow: save file → webpack rebuild (~200ms) → watch detects change → hot reload (~70ms). Total: ~700ms from save to UI update.
+
+## Proxy-only mode (advanced)
+
+To intercept and serve local files without hot reload:
+
+```bash
+npx pcf-dev-proxy -y
+```
+
+Supports Chrome and Edge. No control plane, no WebSocket, no CSP stripping.
 
 ## Troubleshooting
 
-- No reload applied: check `GET /last-ack` for latest runtime status.
-- ACK timeout: ensure Dataverse tab is open in the Chrome instance launched by the proxy.
-- Browser mismatch: hot mode proxy launch currently supports Chrome only (direct WS works in any browser).
-- Multiple rapid builds: queue is latest-wins per control; only newest pending reload is applied.
+| Symptom | Check |
+|---------|-------|
+| Reload not applied | `GET /last-ack` — look for `"status":"failed"` |
+| ACK timeout (15s) | Ensure Dataverse tab is open in the launched Chrome |
+| Port in use | `lsof -ti:8642 \| xargs kill` or use `--port` |
+| Multiple rapid reloads | Queue is latest-wins per control; only newest applies |
+| Browser mismatch | Hot mode requires Chrome (`--browser chrome`) |
 
 ## Requirements
 
 - Node.js >= 18
-- Chrome for hot mode (Edge remains supported for non-hot proxy usage)
-- A PCF project with `ControlManifest.Input.xml`
+- Chrome (hot mode requires Chrome for WebSocket injection)
+- PCF project with `ControlManifest.Input.xml`
 
 ## License
 
