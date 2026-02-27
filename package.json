@@ -28,10 +28,12 @@
 	},
 	"author": "Kristoffer Rasmussen",
 	"dependencies": {
-		"mockttp": "^4.2.1"
+		"mockttp": "^4.2.1",
+		"ws": "^8.19.0"
 	},
 	"devDependencies": {
 		"@types/node": "^20.10.4",
+		"@types/ws": "^8",
 		"typescript": "^5.3.3"
 	},
 	"engines": {

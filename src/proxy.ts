@@ -250,7 +250,7 @@ function broadcastReload(wss: InstanceType<typeof WebSocketServer>, controlName:
 	console.log(`  [HMR] bundle.js changed — notified ${sent} client(s)`);
 }
 
-function startHmrServer(wsPort: number, controlName: string): HmrServer {
+async function startHmrServer(wsPort: number, controlName: string): Promise<HmrServer> {
 	const wss = new WebSocketServer({ noServer: true });
 
 	const httpServer = http.createServer((req, res) => {
@@ -290,10 +290,19 @@ function startHmrServer(wsPort: number, controlName: string): HmrServer {
 		console.log("  [HMR] Browser client connected");
 	});
 
-	httpServer.listen(wsPort, "127.0.0.1", () => {
-		console.log(`  [HMR] WebSocket server on ws://127.0.0.1:${wsPort}`);
-		console.log(`  [HMR] Trigger reload: curl -X POST http://127.0.0.1:${wsPort}/reload`);
+	await new Promise<void>((resolve, reject) => {
+		httpServer.on("error", (err: NodeJS.ErrnoException) => {
+			if (err.code === "EADDRINUSE") {
+				reject(new Error(`Port ${wsPort} is already in use. Use --ws-port to specify a different HMR port.`));
+			} else {
+				reject(err);
+			}
+		});
+		httpServer.listen(wsPort, "127.0.0.1", () => resolve());
 	});
+
+	console.log(`  [HMR] WebSocket server on ws://127.0.0.1:${wsPort}`);
+	console.log(`  [HMR] Trigger reload: curl -X POST http://127.0.0.1:${wsPort}/reload`);
 
 	return { wss, httpServer };
 }
@@ -306,7 +315,7 @@ function watchBundleAndBroadcast(
 	let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 	const watcher = fs.watch(servingDir, { recursive: false }, (_eventType, filename) => {
-		if (filename !== "bundle.js") return;
+		if (filename !== null && filename !== "bundle.js") return;
 		if (debounceTimer) clearTimeout(debounceTimer);
 		debounceTimer = setTimeout(() => broadcastReload(wss, controlName), 300);
 	});
@@ -392,7 +401,7 @@ async function startProxy(port: number, servingDir: string, controlName: string,
 	};
 
 	// Start HMR WebSocket server + file watcher
-	const hmr = startHmrServer(effectiveWsPort, controlName);
+	const hmr = await startHmrServer(effectiveWsPort, controlName);
 	const watcher = watchBundleAndBroadcast(hmr.wss, servingDir, controlName);
 
 	await launchBrowserWithProxy(port, ca.cert, browser, autoYes);
@@ -400,8 +409,11 @@ async function startProxy(port: number, servingDir: string, controlName: string,
 	async function shutdown() {
 		console.log("\nShutting down proxy...");
 		watcher.close();
-		hmr.httpServer.close();
-		hmr.wss.close();
+		for (const client of hmr.wss.clients) {
+			client.terminate();
+		}
+		await new Promise<void>((resolve) => hmr.wss.close(() => resolve()));
+		await new Promise<void>((resolve) => hmr.httpServer.close(() => resolve()));
 		await server.stop();
 		process.exit(0);
 	}
