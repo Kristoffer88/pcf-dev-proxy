@@ -174,11 +174,6 @@ test("HMR_CLIENT_SOURCE contains direct WS connection code", () => {
   assert.ok(HMR_CLIENT_SOURCE.includes("pcf-hmr:ack"), "should send ACK over WS");
 });
 
-test("HMR_CLIENT_SOURCE keeps extension postMessage fallback", () => {
-  assert.ok(HMR_CLIENT_SOURCE.includes("pcf-hmr-ext"), "should still listen for extension messages");
-  assert.ok(HMR_CLIENT_SOURCE.includes("window.postMessage"), "should have postMessage fallback");
-});
-
 test("direct WS client receives reload via WS and ACKs via WS", async () => {
   const port = await getFreePort();
   const plane = await createHmrControlPlane(port, "cc_Test.Control");

@@ -12,8 +12,7 @@
 		"prepublishOnly": "npm run build"
 	},
 	"files": [
-		"dist",
-		"extension"
+		"dist"
 	],
 	"keywords": [
 		"pcf",

@@ -2,7 +2,7 @@
  * In-page runtime for PCF hot reload.
  *
  * Loaded by appending this snippet to intercepted bundle.js in hot mode.
- * Extension content scripts send reload events using window.postMessage.
+ * Connects directly to the proxy control plane via WebSocket.
  */
 
 export const HMR_CLIENT_SOURCE = `;(function () {
@@ -177,13 +177,13 @@ export const HMR_CLIENT_SOURCE = `;(function () {
   var _ws = null;
 
   function emit(type, payload) {
-    if (_ws && _ws.readyState === 1 && type === "pcf-hmr:ack") {
+    if (_ws && _ws.readyState === 1) {
       try {
-        _ws.send(JSON.stringify({ type: "pcf-hmr:ack", payload: payload }));
+        _ws.send(JSON.stringify({ type: type, payload: payload }));
         return;
       } catch (_) {}
     }
-    window.postMessage({ source: "pcf-hmr-runtime", type: type, payload: payload }, "*");
+    warn("WS not connected, dropping " + type);
   }
 
   function getReloadState(shortName) {
@@ -310,7 +310,6 @@ export const HMR_CLIENT_SOURCE = `;(function () {
           error: error && error.message ? error.message : String(error),
           timestamp: Date.now()
         };
-        emit("pcf-hmr:error", ack);
         emit("pcf-hmr:ack", ack);
       })
       .finally(function () {
@@ -323,17 +322,7 @@ export const HMR_CLIENT_SOURCE = `;(function () {
       });
   }
 
-  window.addEventListener("message", function (event) {
-    if (event.source !== window) return;
-    var msg = event.data;
-    if (!msg || msg.source !== "pcf-hmr-ext") return;
-
-    if (msg.type === "pcf-hmr:reload" && msg.payload) {
-      runReload(msg.payload);
-    }
-  });
-
-  // Direct WebSocket connection — bypasses extension entirely
+  // Direct WebSocket connection to proxy control plane
   function connectWs() {
     try {
       var ws = new WebSocket("ws://127.0.0.1:" + _wsPort + "/ws");

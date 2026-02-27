@@ -22,8 +22,7 @@ npx pcf-dev-proxy --hot --yes
 Hot mode adds:
 
 - local HMR control plane on `127.0.0.1` (default port `8643`)
-- direct WebSocket from page to control plane (no extension required)
-- optional Chrome extension bridge as fallback
+- direct WebSocket from page to control plane
 - in-page runtime instrumentation for PCF instance swap
 - CSP header stripping on passthrough responses (hot mode only)
 

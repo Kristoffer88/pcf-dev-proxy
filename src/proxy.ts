@@ -268,9 +268,6 @@ async function launchBrowserWithProxy(
 		`--user-data-dir=${dataDir}`,
 	];
 
-	// Extension is loaded manually by the user via chrome://extensions.
-	// CLI --load-extension flags conflict with manually loaded extensions.
-
 	const shouldLaunch = autoYes || await confirm(`Launch ${label} with proxy?`);
 	if (!shouldLaunch) {
 		console.log(`Skipping ${label} launch. Start manually with:\n  "${binary}" ${browserArgs.join(" ")}`);
