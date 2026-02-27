@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "PCF Dev Proxy Hot Reload",
+  "version": "1.0.0",
+  "description": "Bridge reload events from pcf-dev-proxy to Dataverse tabs.",
+  "permissions": [
+    "tabs",
+    "storage",
+    "alarms"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "host_permissions": [
+    "https://*.dynamics.com/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.dynamics.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}

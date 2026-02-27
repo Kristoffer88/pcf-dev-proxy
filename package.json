@@ -8,10 +8,12 @@
 	},
 	"scripts": {
 		"build": "tsc",
+		"test": "npm run build && node --test test/*.test.js",
 		"prepublishOnly": "npm run build"
 	},
 	"files": [
-		"dist"
+		"dist",
+		"extension"
 	],
 	"keywords": [
 		"pcf",
@@ -28,7 +30,8 @@
 	},
 	"author": "Kristoffer Rasmussen",
 	"dependencies": {
-		"mockttp": "^4.2.1"
+		"mockttp": "^4.2.1",
+		"ws": "^8.18.0"
 	},
 	"devDependencies": {
 		"@types/node": "^20.10.4",

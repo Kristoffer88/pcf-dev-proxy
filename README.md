@@ -1,6 +1,9 @@
 # pcf-dev-proxy
 
-HTTPS proxy that intercepts deployed PCF bundle requests from Dynamics 365 and serves your local build instead.
+HTTPS MITM proxy for PCF development against live Dataverse pages.
+
+By default it intercepts control assets and serves local build output.
+With `--hot`, it also enables deterministic in-place PCF control hot-reload (no full page refresh).
 
 ## Quick start
 
@@ -8,92 +11,115 @@ HTTPS proxy that intercepts deployed PCF bundle requests from Dynamics 365 and s
 npx pcf-dev-proxy
 ```
 
-Reads your `ControlManifest.Input.xml`, detects the control name, and starts intercepting.
+This auto-detects `ControlManifest.Input.xml`, resolves `cc_<namespace>.<constructor>`, and serves files from `out/controls/<constructor>`.
 
-```
-Auto-detected control: cc_Contoso.MyControl
-Restart Chrome with proxy PAC? [Y/n] y
-Closing Chrome...
-Relaunched Chrome with proxy PAC file.
-
-PCF Dev Proxy running on port 8642
-Intercepting: cc_Contoso.MyControl/*
-Serving from: out/controls/MyControl/
-
-  200  bundle.js (847 KB)
-  200  bundle.js.map (1204 KB)
-```
-
-Or install as a devDependency:
+## Hot mode (Chrome, no full page reload)
 
 ```bash
-npm install --save-dev pcf-dev-proxy
+npx pcf-dev-proxy --hot --yes
 ```
+
+Hot mode adds:
+
+- local HMR control plane on `127.0.0.1` (default port `8643`)
+- Chrome extension bridge (auto-loaded when proxy launches Chrome)
+- in-page runtime instrumentation for PCF instance swap
+
+No CSP stripping is used.
+
+### Trigger reload from your build pipeline
+
+Primary workflow is explicit trigger from build completion:
+
+```bash
+npx pcf-dev-proxy reload \
+  --control cc_Contoso.MyControl \
+  --trigger pcf-start \
+  --build-id "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
+
+Optional fallback watcher:
+
+```bash
+npx pcf-dev-proxy --hot --watch-bundle
+```
+
+## Control plane API
+
+When hot mode is enabled (`--hot`):
+
+- `GET /health`
+- `POST /reload`
+- `POST /ack`
+- `GET /last-ack`
+
+Example reload payload:
 
 ```json
-{
-  "scripts": {
-    "proxy": "pcf-dev-proxy"
-  }
-}
+{ "controlName": "cc_Contoso.MyControl", "buildId": "2026-02-27T12:34:56.789Z", "trigger": "pcf-start" }
 ```
 
-## How it works
+Example ACK payload from runtime:
 
-```
-Chrome (--proxy-pac-url) → PAC file (only *.dynamics.com) → MITM proxy (port 8642)
-  ├── matching requests → serve from local out/controls/ directory
-  └── all other requests → passthrough to real servers
+```json
+{ "id": "r-123", "controlName": "cc_Contoso.MyControl", "buildId": "2026-02-27T12:34:56.789Z", "status": "success", "instancesTotal": 2, "instancesReloaded": 2, "durationMs": 184 }
 ```
 
-1. Finds `ControlManifest.Input.xml` by walking up from your working directory
-2. Parses `namespace` + `constructor` → builds intercept pattern (e.g. `cc_Contoso.MyControl`)
-3. Generates a CA certificate (persisted in `.cache/`), trusts it in the OS keychain
-4. Writes a PAC file that routes only `*.dynamics.com` through the proxy
-5. Starts an HTTPS MITM proxy that intercepts matching bundle requests
-6. Restarts Chrome with `--proxy-pac-url` pointing to the PAC
-
-## CLI options
+## CLI
 
 ```bash
-npx pcf-dev-proxy                              # auto-detect everything
-npx pcf-dev-proxy --port 9000                  # custom port
-npx pcf-dev-proxy --control cc_Contoso.MyCtrl  # override control name
-npx pcf-dev-proxy --dir ./my-build-output      # custom serving directory
-npx pcf-dev-proxy --no-system-proxy            # don't configure system proxy
-npx pcf-dev-proxy --off                        # disable proxy and exit
+# start proxy
+npx pcf-dev-proxy [options]
+
+# enqueue a reload (no proxy startup)
+npx pcf-dev-proxy reload --control <name> [options]
 ```
 
-## Typical workflow
+Options:
+
+- `--port <number>` Proxy port (default `8642`)
+- `--ws-port <number>` HMR control plane port (default `8643`)
+- `--dir <path>` Directory to serve files from
+- `--control <name>` Override control name
+- `--browser <name>` `chrome` or `edge` (auto-detected)
+- `--hot` Enable hot mode (Chrome only)
+- `--watch-bundle` Watch `bundle.js` and enqueue reload (hot mode only)
+- `-y, --yes` Skip launch prompt
+
+Reload subcommand options:
+
+- `--ws-port <number>` Control plane port
+- `--control <name>` Required control name
+- `--build-id <id>` Build identifier
+- `--trigger <source>` Trigger label
+- `--changed-files <csv>` Optional changed files metadata
+
+## Typical PCF workflow
 
 ```bash
-# Terminal 1: watch mode
-npm start
+# terminal 1
+pcf-start
 
-# Terminal 2: proxy
-npx pcf-dev-proxy
+# terminal 2
+npx pcf-dev-proxy --hot
+
+# after successful build
+npx pcf-dev-proxy reload --control cc_Contoso.MyControl --trigger pcf-start
 ```
 
-Save a file → webpack rebuilds → refresh browser → see changes against live Dynamics 365.
+## Troubleshooting
 
-## Platform support
-
-| Feature | macOS | Windows |
-|---------|-------|---------|
-| Auto-proxy (PAC) | networksetup | Registry |
-| CA trust | Keychain (sudo) | certutil |
-| Chrome restart | osascript | taskkill |
+- No reload applied: check `GET /last-ack` for latest runtime status.
+- ACK timeout: ensure Dataverse tab is open in the Chrome instance launched by the proxy.
+- Browser mismatch: hot mode currently supports Chrome only.
+- Multiple rapid builds: queue is latest-wins per control; only newest pending reload is applied.
 
 ## Requirements
 
 - Node.js >= 18
-- Chrome (or any Chromium browser)
+- Chrome for hot mode (Edge remains supported for non-hot proxy usage)
 - A PCF project with `ControlManifest.Input.xml`
 
 ## License
 
 MIT
-
-## Credits
-
-Built on [mockttp](https://github.com/httptoolkit/mockttp) by [HTTP Toolkit](https://httptoolkit.com/).
