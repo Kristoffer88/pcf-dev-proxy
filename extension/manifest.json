@@ -1,0 +1,25 @@
+{
+	"manifest_version": 3,
+	"name": "PCF Dev Proxy — Hot Reload",
+	"version": "1.0.0",
+	"description": "Strips CSP headers from Dataverse to enable PCF hot-reloading via pcf-dev-proxy",
+	"permissions": [
+		"declarativeNetRequest"
+	],
+	"host_permissions": [
+		"https://*.dynamics.com/*"
+	],
+	"declarative_net_request": {
+		"rule_resources": [
+			{
+				"id": "strip_csp",
+				"enabled": true,
+				"path": "rules.json"
+			}
+		]
+	},
+	"background": {
+		"service_worker": "background.js"
+	},
+	"icons": {}
+}

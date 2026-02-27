@@ -13,11 +13,14 @@
 
 import * as crypto from "crypto";
 import * as fs from "fs";
+import * as http from "http";
 import * as os from "os";
 import * as path from "path";
 import * as readline from "readline";
 import { execSync, spawn } from "child_process";
 import * as mockttp from "mockttp";
+import { WebSocketServer, WebSocket as WsWebSocket } from "ws";
+import { HMR_CLIENT_SOURCE } from "./hmr-client";
 
 // ---------------------------------------------------------------------------
 // Auto-detect control name from ControlManifest.Input.xml
@@ -223,11 +226,107 @@ async function launchBrowserWithProxy(port: number, certPem: string, browser: Br
 }
 
 // ---------------------------------------------------------------------------
+// HMR: WebSocket server + file watcher
+// ---------------------------------------------------------------------------
+
+interface HmrServer {
+	wss: InstanceType<typeof WebSocketServer>;
+	httpServer: http.Server;
+}
+
+function broadcastReload(wss: InstanceType<typeof WebSocketServer>, controlName: string) {
+	const message = JSON.stringify({
+		type: "pcf-reload",
+		controlName,
+		timestamp: Date.now(),
+	});
+	let sent = 0;
+	wss.clients.forEach((client) => {
+		if (client.readyState === WsWebSocket.OPEN) {
+			client.send(message);
+			sent++;
+		}
+	});
+	console.log(`  [HMR] bundle.js changed — notified ${sent} client(s)`);
+}
+
+function startHmrServer(wsPort: number, controlName: string): HmrServer {
+	const wss = new WebSocketServer({ noServer: true });
+
+	const httpServer = http.createServer((req, res) => {
+		res.setHeader("Access-Control-Allow-Origin", "*");
+		res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+
+		if (req.method === "OPTIONS") {
+			res.writeHead(204);
+			res.end();
+			return;
+		}
+
+		if (req.method === "GET" && (req.url === "/" || req.url === "")) {
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ status: "ok", type: "pcf-dev-proxy-hmr" }));
+			return;
+		}
+
+		if (req.method === "POST" && req.url === "/reload") {
+			broadcastReload(wss, controlName);
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ ok: true, clients: wss.clients.size }));
+			return;
+		}
+
+		res.writeHead(404);
+		res.end();
+	});
+
+	httpServer.on("upgrade", (req, socket, head) => {
+		wss.handleUpgrade(req, socket, head, (ws) => {
+			wss.emit("connection", ws, req);
+		});
+	});
+
+	wss.on("connection", () => {
+		console.log("  [HMR] Browser client connected");
+	});
+
+	httpServer.listen(wsPort, "127.0.0.1", () => {
+		console.log(`  [HMR] WebSocket server on ws://127.0.0.1:${wsPort}`);
+		console.log(`  [HMR] Trigger reload: curl -X POST http://127.0.0.1:${wsPort}/reload`);
+	});
+
+	return { wss, httpServer };
+}
+
+function watchBundleAndBroadcast(
+	wss: InstanceType<typeof WebSocketServer>,
+	servingDir: string,
+	controlName: string,
+): fs.FSWatcher {
+	let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const watcher = fs.watch(servingDir, { recursive: false }, (_eventType, filename) => {
+		if (filename !== "bundle.js") return;
+		if (debounceTimer) clearTimeout(debounceTimer);
+		debounceTimer = setTimeout(() => broadcastReload(wss, controlName), 300);
+	});
+
+	console.log(`  [HMR] Watching ${path.join(servingDir, "bundle.js")} for changes`);
+	return watcher;
+}
+
+function getHmrSnippet(wsPort: number): string {
+	return HMR_CLIENT_SOURCE.replace(/__WS_PORT__/g, String(wsPort));
+}
+
+// ---------------------------------------------------------------------------
 // Proxy server
 // ---------------------------------------------------------------------------
 
-async function startProxy(port: number, servingDir: string, controlName: string, browser: Browser, autoYes = false) {
+async function startProxy(port: number, servingDir: string, controlName: string, browser: Browser, autoYes = false, wsPort?: number) {
 	const interceptRe = new RegExp(`${controlName.replace(".", "\\.")}\/([^?]+)`);
+	const effectiveWsPort = wsPort ?? port + 1;
+	const hmrSnippet = getHmrSnippet(effectiveWsPort);
 
 	if (!fs.existsSync(servingDir)) {
 		console.error(`Serving directory does not exist: ${servingDir}\nRun your build command first.`);
@@ -263,8 +362,14 @@ async function startProxy(port: number, servingDir: string, controlName: string,
 			if (filename.endsWith(".js") && fs.existsSync(filePath + ".map")) {
 				body = Buffer.concat([body, Buffer.from(`\n//# sourceMappingURL=${filename}.map\n`)]);
 			}
+
+			// Inject HMR client into bundle.js
+			if (filename === "bundle.js") {
+				body = Buffer.concat([body, Buffer.from(`\n${hmrSnippet}\n`)]);
+			}
+
 			const kb = Math.round(body.length / 1024);
-			console.log(`  200  ${filename} (${kb} KB)`);
+			console.log(`  200  ${filename} (${kb} KB)${filename === "bundle.js" ? " [+HMR]" : ""}`);
 
 			return {
 				statusCode: 200,
@@ -286,10 +391,17 @@ async function startProxy(port: number, servingDir: string, controlName: string,
 		_consoleError(...args);
 	};
 
+	// Start HMR WebSocket server + file watcher
+	const hmr = startHmrServer(effectiveWsPort, controlName);
+	const watcher = watchBundleAndBroadcast(hmr.wss, servingDir, controlName);
+
 	await launchBrowserWithProxy(port, ca.cert, browser, autoYes);
 
 	async function shutdown() {
 		console.log("\nShutting down proxy...");
+		watcher.close();
+		hmr.httpServer.close();
+		hmr.wss.close();
 		await server.stop();
 		process.exit(0);
 	}
@@ -300,7 +412,8 @@ async function startProxy(port: number, servingDir: string, controlName: string,
 
 	console.log(`\nPCF Dev Proxy running on port ${port}`);
 	console.log(`Intercepting: ${controlName}/*`);
-	console.log(`Serving from: ${servingDir}\n`);
+	console.log(`Serving from: ${servingDir}`);
+	console.log(`Hot reload: ws://127.0.0.1:${effectiveWsPort}\n`);
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +422,7 @@ async function startProxy(port: number, servingDir: string, controlName: string,
 
 const args = process.argv.slice(2);
 let port = 8642;
+let wsPortOverride: number | undefined;
 let dirOverride: string | null = null;
 let controlOverride: string | null = null;
 let browserOverride: Browser | null = null;
@@ -319,6 +433,10 @@ for (let i = 0; i < args.length; i++) {
 		const portArg = args[++i];
 		port = parseInt(portArg, 10);
 		if (isNaN(port) || port < 1 || port > 65535) { console.error(`Invalid port: ${portArg}`); process.exit(1); }
+	}
+	else if (args[i] === "--ws-port" && args[i + 1]) {
+		wsPortOverride = parseInt(args[++i], 10);
+		if (isNaN(wsPortOverride) || wsPortOverride < 1 || wsPortOverride > 65535) { console.error(`Invalid ws-port`); process.exit(1); }
 	}
 	else if (args[i] === "--dir" && args[i + 1]) { dirOverride = args[++i]; }
 	else if (args[i] === "--control" && args[i + 1]) { controlOverride = args[++i]; }
@@ -336,6 +454,7 @@ Usage: pcf-dev-proxy [options]
 
 Options:
   --port <number>       Proxy port (default: 8642)
+  --ws-port <number>    HMR WebSocket port (default: proxy port + 1)
   --dir <path>          Directory to serve files from (auto-detected from manifest)
   --control <name>      Override control name (e.g. cc_Projectum.PowerRoadmap)
   --browser <name>      Browser to use: chrome, edge (default: auto-detect)
@@ -388,4 +507,4 @@ if (dirOverride) {
 }
 const browser = browserOverride || detectBrowser();
 
-startProxy(port, servingDir, controlName, browser, skipPrompt);
+startProxy(port, servingDir, controlName, browser, skipPrompt, wsPortOverride);
