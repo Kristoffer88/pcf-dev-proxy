@@ -11,6 +11,7 @@ import * as http from "http";
 import * as os from "os";
 import * as path from "path";
 import * as readline from "readline";
+import { parseArgs } from "node:util";
 import { execSync, spawn } from "child_process";
 import * as mockttp from "mockttp";
 import { WebSocketServer, WebSocket as WsWebSocket } from "ws";
@@ -790,25 +791,21 @@ function requestJson(method: "POST" | "GET", port: number, pathname: string, pay
 }
 
 export async function runReloadCommand(args: string[]): Promise<void> {
-	let wsPort = 8643;
-	let controlName: string | null = null;
-	let buildId = new Date().toISOString();
-	let trigger = "manual";
-	let changedFiles: string[] | undefined;
+	const { values } = parseArgs({
+		args,
+		options: {
+			"ws-port":       { type: "string" },
+			control:         { type: "string" },
+			"build-id":      { type: "string" },
+			trigger:         { type: "string" },
+			"changed-files": { type: "string" },
+			help:            { type: "boolean", short: "h", default: false },
+		},
+		strict: true,
+	});
 
-	for (let i = 0; i < args.length; i++) {
-		if (args[i] === "--ws-port" && args[i + 1]) {
-			wsPort = parsePort(args[++i], "ws-port");
-		} else if (args[i] === "--control" && args[i + 1]) {
-			controlName = args[++i];
-		} else if (args[i] === "--build-id" && args[i + 1]) {
-			buildId = args[++i];
-		} else if (args[i] === "--trigger" && args[i + 1]) {
-			trigger = args[++i];
-		} else if (args[i] === "--changed-files" && args[i + 1]) {
-			changedFiles = args[++i].split(",").map((v) => v.trim()).filter(Boolean);
-		} else if (args[i] === "--help" || args[i] === "-h") {
-			console.log(`Usage: pcf-dev-proxy reload --control <name> [options]
+	if (values.help) {
+		console.log(`Usage: pcf-dev-proxy reload --control <name> [options]
 
 Options:
   --ws-port <number>      HMR control plane port (default: 8643)
@@ -816,18 +813,23 @@ Options:
   --build-id <id>         Build identifier (default: ISO timestamp)
   --trigger <source>      Trigger label (default: manual)
   --changed-files <list>  Comma-separated changed files\n`);
-			return;
-		}
+		return;
 	}
 
+	const wsPort = values["ws-port"] ? parsePort(values["ws-port"], "ws-port") : 8643;
+	const controlName = values.control;
 	if (!controlName) {
 		throw new Error("reload command requires --control <name>");
 	}
 
+	const changedFiles = values["changed-files"]
+		? values["changed-files"].split(",").map((v) => v.trim()).filter(Boolean)
+		: undefined;
+
 	const payload: ReloadRequest = {
 		controlName,
-		buildId,
-		trigger,
+		buildId: values["build-id"] || new Date().toISOString(),
+		trigger: values.trigger || "manual",
 		changedFiles,
 	};
 
@@ -843,7 +845,7 @@ Options:
 // ---------------------------------------------------------------------------
 
 function printHelp(detectedBrowser: Browser, detectedControl: { controlName: string; constructor: string; manifestDir: string } | null): void {
-	console.log(`PCF Dev Proxy - HTTPS MITM proxy for local PCF development
+	console.log(`PCF Dev Proxy - HTTPS MITM proxy with hot reload for PCF controls
 
 Usage:
   pcf-dev-proxy [options]
@@ -855,9 +857,9 @@ Options:
   --dir <path>            Directory to serve files from (auto-detected from manifest)
   --control <name>        Override control name (e.g. cc_Projectum.PowerRoadmap)
   --browser <name>        Browser to use: chrome, edge (default: auto-detect)
-  --hot                   Enable hot-reload mode (Chrome only)
-  --watch-bundle          Watch bundle.js and emit reload (only with --hot)
-  -y, --yes               Skip browser launch prompt
+  --no-hot                Disable hot-reload (proxy-only, supports Edge)
+  --watch-bundle          Watch bundle.js and auto-reload on change
+  --prompt                Show browser launch confirmation prompt
   -h, --help              Show this help
 
 Reload subcommand:
@@ -915,53 +917,47 @@ export async function main(): Promise<void> {
 		return;
 	}
 
-	let port = 8642;
-	let wsPort = 8643;
-	let dirOverride: string | null = null;
-	let controlOverride: string | null = null;
-	let browserOverride: Browser | null = null;
-	let skipPrompt = false;
-	let hotMode = false;
-	let watchBundle = false;
+	const { values } = parseArgs({
+		args,
+		options: {
+			port:            { type: "string" },
+			"ws-port":       { type: "string" },
+			dir:             { type: "string" },
+			control:         { type: "string" },
+			browser:         { type: "string" },
+			hot:             { type: "boolean", default: true },
+			"watch-bundle":  { type: "boolean", default: false },
+			prompt:          { type: "boolean", default: false },
+			help:            { type: "boolean", short: "h", default: false },
+		},
+		strict: true,
+	});
 
-	for (let i = 0; i < args.length; i++) {
-		if (args[i] === "--port" && args[i + 1]) {
-			port = parsePort(args[++i], "port");
-		} else if (args[i] === "--ws-port" && args[i + 1]) {
-			wsPort = parsePort(args[++i], "ws-port");
-		} else if (args[i] === "--dir" && args[i + 1]) {
-			dirOverride = args[++i];
-		} else if (args[i] === "--control" && args[i + 1]) {
-			controlOverride = args[++i];
-		} else if (args[i] === "--browser" && args[i + 1]) {
-			const b = args[++i].toLowerCase();
-			if (b !== "chrome" && b !== "edge") {
-				throw new Error(`Unknown browser: ${b}. Use "chrome" or "edge".`);
-			}
-			browserOverride = b;
-		} else if (args[i] === "--hot") {
-			hotMode = true;
-		} else if (args[i] === "--watch-bundle") {
-			watchBundle = true;
-		} else if (args[i] === "--yes" || args[i] === "-y") {
-			skipPrompt = true;
-		} else if (args[i] === "--help" || args[i] === "-h") {
-			const detected = detectControl(CWD);
-			printHelp(browserOverride || detectBrowser(), detected);
-			return;
-		}
+	if (values.help) {
+		const detected = detectControl(CWD);
+		printHelp(values.browser as Browser | undefined || detectBrowser(), detected);
+		return;
+	}
+
+	const port = values.port ? parsePort(values.port, "port") : 8642;
+	const wsPort = values["ws-port"] ? parsePort(values["ws-port"], "ws-port") : 8643;
+	const hotMode = values.hot!;
+	const watchBundle = values["watch-bundle"]!;
+
+	if (values.browser && values.browser !== "chrome" && values.browser !== "edge") {
+		throw new Error(`Unknown browser: ${values.browser}. Use "chrome" or "edge".`);
 	}
 
 	if (watchBundle && !hotMode) {
-		throw new Error("--watch-bundle can only be used with --hot");
+		throw new Error("--watch-bundle can only be used with hot mode");
 	}
 
-	const browser = browserOverride || detectBrowser();
+	const browser = (values.browser as Browser) || detectBrowser();
 	if (hotMode && browser !== "chrome") {
-		throw new Error("Hot mode currently supports Chrome only. Use --browser chrome.");
+		throw new Error("Hot mode requires Chrome. Use --browser chrome or --no-hot for Edge.");
 	}
 
-	const resolved = resolveControlAndServingDir(controlOverride, dirOverride);
+	const resolved = resolveControlAndServingDir(values.control ?? null, values.dir ?? null);
 
 	await startProxy({
 		port,
@@ -969,7 +965,7 @@ export async function main(): Promise<void> {
 		servingDir: resolved.servingDir,
 		controlName: resolved.controlName,
 		browser,
-		autoYes: skipPrompt,
+		autoYes: !values.prompt,
 		hotMode,
 		watchBundle,
 	});

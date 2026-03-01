@@ -9,7 +9,7 @@ HTTPS MITM proxy with deterministic hot reload for PCF controls on live Datavers
 npx pcf-scripts start watch
 
 # Terminal 2: proxy with hot reload
-npx pcf-dev-proxy --hot -y
+npx pcf-dev-proxy
 ```
 
 Auto-detects `ControlManifest.Input.xml`, resolves `cc_<namespace>.<constructor>`, and serves files from `out/controls/<constructor>`.
@@ -96,14 +96,14 @@ npx pcf-dev-proxy reload --control <name> [options]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--hot` | off | Enable hot reload (Chrome only) |
-| `-y, --yes` | off | Skip browser launch prompt |
 | `--port <n>` | `8642` | Proxy port |
 | `--ws-port <n>` | `8643` | Control plane port |
 | `--dir <path>` | auto-detected | Directory to serve files from |
 | `--control <name>` | auto-detected | Override control name |
 | `--browser <name>` | auto-detected | `chrome` or `edge` |
+| `--no-hot` | — | Disable hot reload (proxy-only, supports Edge) |
 | `--watch-bundle` | off | Auto-reload on bundle.js change (human mode) |
+| `--prompt` | off | Show browser launch confirmation prompt |
 
 ### Reload subcommand
 
@@ -120,7 +120,7 @@ npx pcf-dev-proxy reload --control <name> [options]
 For interactive development without an agent, add `--watch-bundle` to auto-reload when webpack writes `bundle.js`:
 
 ```bash
-npx pcf-dev-proxy --hot --watch-bundle -y
+npx pcf-dev-proxy --watch-bundle
 ```
 
 Monitors the serving directory with a 500ms debounce, then enqueues a reload automatically. Flow: save file → webpack rebuild (~200ms) → watch detects change → hot reload (~70ms). Total: ~700ms from save to UI update.
@@ -130,7 +130,7 @@ Monitors the serving directory with a 500ms debounce, then enqueues a reload aut
 To intercept and serve local files without hot reload:
 
 ```bash
-npx pcf-dev-proxy -y
+npx pcf-dev-proxy --no-hot
 ```
 
 Supports Chrome and Edge. No control plane, no WebSocket, no CSP stripping.

@@ -11,11 +11,10 @@ Agent controls when the reload fires — no reload spam during multi-file edits.
 cd example/DevProxySample
 npx pcf-scripts start watch
 
-# Terminal 2: proxy WITHOUT --watch-bundle
+# Terminal 2: proxy (hot reload is on by default)
 npx pcf-dev-proxy \
   --control "cc_Example.DevProxySample" \
-  --dir "example/DevProxySample/out/controls/DevProxySample" \
-  --hot -y --browser chrome
+  --dir "example/DevProxySample/out/controls/DevProxySample"
 ```
 
 **Agent workflow:**
@@ -49,7 +48,7 @@ Every save triggers an immediate reload — instant feedback for VS Code editing
 npx pcf-dev-proxy \
   --control "cc_Example.DevProxySample" \
   --dir "example/DevProxySample/out/controls/DevProxySample" \
-  --hot --watch-bundle -y --browser chrome
+  --watch-bundle
 ```
 
 **Flow:** save file → webpack rebuild (~200ms) → watch-bundle detects `bundle.js` change (500ms debounce) → auto-reload (~70ms). Total: **~700ms from save to UI update**.
