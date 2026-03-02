@@ -93,25 +93,35 @@ Reload subcommand options:
 - `--trigger <source>` Trigger label
 - `--changed-files <csv>` Optional changed files metadata
 
+## Browser profile
+
+The proxy launches Chrome with a dedicated profile at `~/.pcf-dev-proxy/chrome-profile`. This profile is **persistent** — your Dataverse login, cookies, and session survive across proxy restarts. You only need to authenticate once.
+
+The profile is separate from your normal Chrome profile, so proxy settings (certificate trust, `--proxy-server` flag) don't affect your daily browsing.
+
 ## Typical PCF workflow
 
 ```bash
-# terminal 1
+# terminal 1 — build watcher
 pcf-start
 
-# terminal 2
+# terminal 2 — proxy
 npx pcf-dev-proxy --hot
 
-# after successful build
+# terminal 3 (or post-build hook) — trigger reload after build completes
 npx pcf-dev-proxy reload --control cc_Contoso.MyControl --trigger pcf-start
 ```
 
+On first run, Chrome opens and you log into Dataverse. On subsequent runs, the session is already there.
+
 ## Troubleshooting
 
-- No reload applied: check `GET /last-ack` for latest runtime status.
-- ACK timeout: ensure Dataverse tab is open in the Chrome instance launched by the proxy.
-- Browser mismatch: hot mode proxy launch currently supports Chrome only (direct WS works in any browser).
-- Multiple rapid builds: queue is latest-wins per control; only newest pending reload is applied.
+- **No reload applied**: check `GET /last-ack` for latest runtime status.
+- **ACK timeout**: ensure Dataverse tab is open in the Chrome instance launched by the proxy.
+- **Chrome won't launch**: if Chrome is already running with the proxy profile, the proxy skips launch. Close the existing proxy Chrome window first, or just reload the page.
+- **Browser mismatch**: hot mode currently supports Chrome only (Edge works for non-hot proxy usage).
+- **Multiple rapid builds**: queue is latest-wins per control; only newest pending reload is applied.
+- **`pcf-scripts build` fails with Chrome profile errors**: this can happen if `.cache/` contains a Chrome profile. The proxy stores its Chrome profile at `~/.pcf-dev-proxy/chrome-profile` (outside the project) to avoid this.
 
 ## Requirements
 

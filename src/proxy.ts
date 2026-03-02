@@ -11,7 +11,6 @@ import * as http from "http";
 import * as os from "os";
 import * as path from "path";
 import * as readline from "readline";
-import * as zlib from "zlib";
 import { execSync, spawn } from "child_process";
 import * as mockttp from "mockttp";
 import { WebSocketServer, WebSocket as WsWebSocket } from "ws";
@@ -86,28 +85,6 @@ function detectControl(cwd: string): { controlName: string; constructor: string;
 // Resolve paths relative to consuming repo (cwd), NOT this package
 // ---------------------------------------------------------------------------
 
-const MIME_TYPES: Record<string, string> = {
-	".js": "application/javascript",
-	".css": "text/css",
-	".map": "application/json",
-	".json": "application/json",
-	".xml": "application/xml",
-	".html": "text/html",
-	".svg": "image/svg+xml",
-	".png": "image/png",
-	".jpg": "image/jpeg",
-	".gif": "image/gif",
-	".woff": "font/woff",
-	".woff2": "font/woff2",
-	".ttf": "font/ttf",
-	".eot": "application/vnd.ms-fontobject",
-};
-
-function getMimeType(filename: string): string {
-	const ext = path.extname(filename).toLowerCase();
-	return MIME_TYPES[ext] || "application/octet-stream";
-}
-
 const CWD = process.cwd();
 const CACHE_DIR = path.join(CWD, ".cache");
 const CA_CERT_PATH = path.join(CACHE_DIR, "proxy-ca.pem");
@@ -166,11 +143,11 @@ interface HmrControlPlane {
 }
 
 // ---------------------------------------------------------------------------
-// Browser data dir (isolated profile like HTTP Toolkit)
+// Browser data dir (persistent profile so cookies/auth survive restarts)
 // ---------------------------------------------------------------------------
 
 function getBrowserDataDir(): string {
-	const dir = path.join(os.tmpdir(), "pcf-dev-proxy-browser");
+	const dir = path.join(os.homedir(), ".pcf-dev-proxy", "chrome-profile");
 	fs.mkdirSync(dir, { recursive: true });
 	return dir;
 }
@@ -637,6 +614,13 @@ function watchBundleAndEnqueue(
 // Proxy server
 // ---------------------------------------------------------------------------
 
+function contentType(filename: string): string {
+	if (filename.endsWith(".css")) return "text/css";
+	if (filename.endsWith(".map") || filename.endsWith(".json")) return "application/json";
+	if (filename.endsWith(".xml") || filename.endsWith(".resx")) return "application/xml";
+	return "application/javascript";
+}
+
 async function startProxy(options: ProxyOptions): Promise<void> {
 	const interceptRe = new RegExp(`${options.controlName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\/([^?]+)`);
 
@@ -689,21 +673,18 @@ async function startProxy(options: ProxyOptions): Promise<void> {
 				body = Buffer.concat([body, Buffer.from(`\n//# sourceMappingURL=${filename}.map\n`)]);
 			}
 
-			const rawKb = Math.round(body.length / 1024);
-			const compressed = zlib.gzipSync(body);
-			const gzKb = Math.round(compressed.length / 1024);
+			const kb = Math.round(body.length / 1024);
 			const hmrTag = options.hotMode && filename === "bundle.js" ? " [+HMR]" : "";
-			console.log(`  200  ${filename} (${gzKb} KB gzip, ${rawKb} KB raw)${hmrTag}`);
+			console.log(`  200  ${filename} (${kb} KB)${hmrTag}`);
 
 			return {
 				statusCode: 200,
 				headers: {
-					"content-type": getMimeType(filename),
-					"content-encoding": "gzip",
+					"content-type": contentType(filename),
 					"cache-control": "no-cache, no-store, must-revalidate",
 					"access-control-allow-origin": "*",
 				},
-				rawBody: compressed,
+				rawBody: body,
 			};
 		});
 

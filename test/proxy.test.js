@@ -234,3 +234,9 @@ test("port injection: __pcfHmrWsPort var is prepended to bundle in hot mode", ()
   assert.ok(proxySource.includes("__pcfHmrWsPort"), "proxy should inject __pcfHmrWsPort variable");
   assert.ok(proxySource.includes("content-security-policy"), "proxy should reference CSP headers for stripping");
 });
+
+test("HMR client performs health check before connecting WS", () => {
+  assert.ok(HMR_CLIENT_SOURCE.includes("/health"), "should check /health endpoint");
+  assert.ok(HMR_CLIENT_SOURCE.includes("pcf-dev-proxy-hmr"), "should verify pcf-dev-proxy-hmr type in health response");
+  assert.ok(HMR_CLIENT_SOURCE.includes("XMLHttpRequest"), "should use XMLHttpRequest for ES5 compat");
+});

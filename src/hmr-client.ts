@@ -350,7 +350,24 @@ export const HMR_CLIENT_SOURCE = `;(function () {
       setTimeout(connectWs, 3000);
     }
   }
-  connectWs();
+
+  // Health check: only connect WS if proxy is actually running.
+  // Prevents HMR client from spamming reconnects if a dev build
+  // is accidentally deployed to production.
+  var xhr = new XMLHttpRequest();
+  xhr.open("GET", "http://127.0.0.1:" + _wsPort + "/health", true);
+  xhr.timeout = 2000;
+  xhr.onload = function () {
+    try {
+      var data = JSON.parse(xhr.responseText);
+      if (data && data.type === "pcf-dev-proxy-hmr") {
+        connectWs();
+      }
+    } catch (_) {}
+  };
+  xhr.onerror = function () {};
+  xhr.ontimeout = function () {};
+  xhr.send();
 
   // Eagerly trap ComponentFramework so we patch registerControl the instant
   // it appears, before the bundle's own registerControl call at the bottom.
