@@ -266,6 +266,7 @@ async function launchBrowserWithProxy(
 		`--proxy-server=127.0.0.1:${port}`,
 		`--ignore-certificate-errors-spki-list=${spki}`,
 		`--user-data-dir=${dataDir}`,
+		"--disable-session-crashed-bubble",
 	];
 
 	const shouldLaunch = autoYes || await confirm(`Launch ${label} with proxy?`);
@@ -664,10 +665,28 @@ async function startProxy(options: ProxyOptions): Promise<void> {
 			}
 
 			let body = fs.readFileSync(filePath);
+			let hmrLineOffset = 0;
 			if (options.hotMode && filename === "bundle.js") {
 				// Inject WS port + HMR client before bundle so registerControl is patched before bundle executes.
 				const portDecl = `var __pcfHmrWsPort = ${options.wsPort};\n`;
-				body = Buffer.concat([Buffer.from(portDecl), Buffer.from(`${HMR_CLIENT_SOURCE}\n`), body]);
+				const prefix = portDecl + HMR_CLIENT_SOURCE + "\n";
+				hmrLineOffset = prefix.split("\n").length - 1;
+				body = Buffer.concat([Buffer.from(prefix), body]);
+			}
+			if (options.hotMode && filename === "bundle.js.map" && hmrLineOffset === 0) {
+				// Adjust source map to account for HMR prefix prepended to bundle.js.
+				// Each ";" in mappings represents one generated line with no source mapping.
+				const prefix = `var __pcfHmrWsPort = ${options.wsPort};\n` + HMR_CLIENT_SOURCE + "\n";
+				hmrLineOffset = prefix.split("\n").length - 1;
+			}
+			if (hmrLineOffset > 0 && filename === "bundle.js.map") {
+				try {
+					const map = JSON.parse(body.toString("utf-8"));
+					map.mappings = ";".repeat(hmrLineOffset) + map.mappings;
+					body = Buffer.from(JSON.stringify(map));
+				} catch {
+					// Serve unmodified map if parsing fails
+				}
 			}
 			if (filename.endsWith(".js") && fs.existsSync(filePath + ".map")) {
 				body = Buffer.concat([body, Buffer.from(`\n//# sourceMappingURL=${filename}.map\n`)]);
