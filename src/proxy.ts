@@ -102,6 +102,9 @@ interface ProxyOptions {
 	autoYes: boolean;
 	hotMode: boolean;
 	watchBundle: boolean;
+	cdpPort: number | null;
+	agentBrowser: boolean;
+	url: string | null;
 }
 
 interface ReloadRequest {
@@ -156,7 +159,7 @@ function getBrowserDataDir(): string {
 // CA certificate
 // ---------------------------------------------------------------------------
 
-async function loadOrCreateCA() {
+async function loadOrCreateCA(): Promise<{ cert: string; key: string }> {
 	if (fs.existsSync(CA_CERT_PATH) && fs.existsSync(CA_KEY_PATH)) {
 		return {
 			cert: fs.readFileSync(CA_CERT_PATH, "utf-8"),
@@ -246,30 +249,61 @@ function isBrowserAlreadyRunning(dataDir: string): boolean {
 }
 
 async function launchBrowserWithProxy(
-	port: number,
+	options: ProxyOptions,
 	certPem: string,
-	browser: Browser,
-	autoYes = false,
-	hotMode = false,
-) {
-	const label = browser === "edge" ? "Edge" : "Chrome";
-	const spki = getSpkiFingerprint(certPem);
+): Promise<void> {
 	const dataDir = getBrowserDataDir();
-	const binary = getBrowserBinary(browser);
+
+	// agent-browser launcher — manages its own browser sessions
+	if (options.agentBrowser) {
+		const abArgs = [
+			"--proxy", `http://127.0.0.1:${options.port}`,
+			"--ignore-https-errors",
+			"--profile", dataDir,
+		];
+		if (options.cdpPort) abArgs.push("--cdp", String(options.cdpPort));
+		abArgs.push("open", options.url || "about:blank");
+		spawn("agent-browser", abArgs, { detached: true, stdio: "ignore" }).unref();
+		console.log("Launched agent-browser with proxy.");
+		return;
+	}
+
+	const label = options.browser === "edge" ? "Edge" : "Chrome";
+	const spki = getSpkiFingerprint(certPem);
+	const binary = getBrowserBinary(options.browser);
 
 	if (isBrowserAlreadyRunning(dataDir)) {
-		console.log(`${label} already running with proxy profile — skipping launch.`);
+		if (options.url) {
+			// Open URL in existing Chrome instance (same profile → reuses running process)
+			try {
+				const child = spawn(binary, [`--user-data-dir=${dataDir}`, options.url], { detached: true, stdio: "ignore" });
+				child.unref();
+				console.log(`${label} already running — opened URL in existing instance.`);
+			} catch {
+				console.log(`${label} already running. Could not open URL — open it manually.`);
+			}
+		} else {
+			console.log(`${label} already running with proxy profile — skipping launch.`);
+		}
 		return;
 	}
 
 	const browserArgs = [
-		`--proxy-server=127.0.0.1:${port}`,
+		`--proxy-server=127.0.0.1:${options.port}`,
 		`--ignore-certificate-errors-spki-list=${spki}`,
 		`--user-data-dir=${dataDir}`,
 		"--disable-session-crashed-bubble",
 	];
 
-	const shouldLaunch = autoYes || await confirm(`Launch ${label} with proxy?`);
+	if (options.cdpPort) {
+		browserArgs.push(`--remote-debugging-port=${options.cdpPort}`);
+	}
+
+	if (options.url) {
+		browserArgs.push(options.url);
+	}
+
+	const shouldLaunch = options.autoYes || await confirm(`Launch ${label} with proxy?`);
 	if (!shouldLaunch) {
 		console.log(`Skipping ${label} launch. Start manually with:\n  "${binary}" ${browserArgs.join(" ")}`);
 		return;
@@ -288,7 +322,10 @@ async function launchBrowserWithProxy(
 			child.unref();
 		}
 		console.log(`Launched ${label} with proxy (isolated profile).`);
-		if (hotMode) {
+		if (options.cdpPort) {
+			console.log(`CDP available on port ${options.cdpPort}.`);
+		}
+		if (options.hotMode) {
 			console.log("Hot mode enabled: HMR control plane active.");
 		}
 	} catch {
@@ -300,6 +337,14 @@ async function launchBrowserWithProxy(
 // HMR control plane (local HTTP + WS)
 // ---------------------------------------------------------------------------
 
+function nonEmptyString(val: unknown, fallback: string): string {
+	return typeof val === "string" && val.trim().length > 0 ? val.trim() : fallback;
+}
+
+function asRecord(body: unknown): Record<string, unknown> {
+	return body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+}
+
 function sendJson(res: http.ServerResponse, statusCode: number, payload: unknown): void {
 	res.writeHead(statusCode, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
 	res.end(JSON.stringify(payload));
@@ -310,37 +355,25 @@ async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
 	for await (const chunk of req) {
 		chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
 	}
-	if (chunks.length === 0) return {};
 	const raw = Buffer.concat(chunks).toString("utf-8").trim();
 	if (!raw) return {};
 	return JSON.parse(raw);
 }
 
 export function toReloadRequest(body: unknown, fallbackControlName: string): ReloadRequest {
-	const payload = (body && typeof body === "object") ? (body as Record<string, unknown>) : {};
-	const controlNameValue = typeof payload.controlName === "string" && payload.controlName.trim().length > 0
-		? payload.controlName.trim()
-		: fallbackControlName;
-	const buildId = typeof payload.buildId === "string" && payload.buildId.trim().length > 0
-		? payload.buildId.trim()
-		: new Date().toISOString();
-	const trigger = typeof payload.trigger === "string" && payload.trigger.trim().length > 0
-		? payload.trigger.trim()
-		: "manual";
-	const changedFiles = Array.isArray(payload.changedFiles)
-		? payload.changedFiles.filter((v): v is string => typeof v === "string")
-		: undefined;
-
+	const payload = asRecord(body);
 	return {
-		controlName: controlNameValue,
-		buildId,
-		trigger,
-		changedFiles,
+		controlName: nonEmptyString(payload.controlName, fallbackControlName),
+		buildId: nonEmptyString(payload.buildId, new Date().toISOString()),
+		trigger: nonEmptyString(payload.trigger, "manual"),
+		changedFiles: Array.isArray(payload.changedFiles)
+			? payload.changedFiles.filter((v): v is string => typeof v === "string")
+			: undefined,
 	};
 }
 
 export function toReloadAck(body: unknown): ReloadAck {
-	const payload = (body && typeof body === "object") ? (body as Record<string, unknown>) : {};
+	const payload = asRecord(body);
 	const status = payload.status;
 	if (status !== "success" && status !== "partial" && status !== "failed") {
 		throw new Error("Invalid ACK status");
@@ -390,7 +423,7 @@ export function createHmrControlPlane(wsPort: number, fallbackControlName: strin
 	let nextId = 1;
 
 	function toAckMap(): Record<string, ReloadAck> {
-		return Object.fromEntries(lastAckByControl.entries());
+		return Object.fromEntries(lastAckByControl);
 	}
 
 	function getQueue(controlName: string): ControlQueueState {
@@ -615,11 +648,17 @@ function watchBundleAndEnqueue(
 // Proxy server
 // ---------------------------------------------------------------------------
 
+const CONTENT_TYPES: Record<string, string> = {
+	".css": "text/css",
+	".map": "application/json",
+	".json": "application/json",
+	".xml": "application/xml",
+	".resx": "application/xml",
+};
+
 function contentType(filename: string): string {
-	if (filename.endsWith(".css")) return "text/css";
-	if (filename.endsWith(".map") || filename.endsWith(".json")) return "application/json";
-	if (filename.endsWith(".xml") || filename.endsWith(".resx")) return "application/xml";
-	return "application/javascript";
+	const ext = path.extname(filename);
+	return CONTENT_TYPES[ext] || "application/javascript";
 }
 
 async function startProxy(options: ProxyOptions): Promise<void> {
@@ -665,19 +704,12 @@ async function startProxy(options: ProxyOptions): Promise<void> {
 			}
 
 			let body = fs.readFileSync(filePath);
-			let hmrLineOffset = 0;
-			if (options.hotMode && filename === "bundle.js") {
-				// Inject WS port + HMR client before bundle so registerControl is patched before bundle executes.
-				const portDecl = `var __pcfHmrWsPort = ${options.wsPort};\n`;
-				const prefix = portDecl + HMR_CLIENT_SOURCE + "\n";
-				hmrLineOffset = prefix.split("\n").length - 1;
-				body = Buffer.concat([Buffer.from(prefix), body]);
-			}
-			if (options.hotMode && filename === "bundle.js.map" && hmrLineOffset === 0) {
-				// Adjust source map to account for HMR prefix prepended to bundle.js.
-				// Each ";" in mappings represents one generated line with no source mapping.
-				const prefix = `var __pcfHmrWsPort = ${options.wsPort};\n` + HMR_CLIENT_SOURCE + "\n";
-				hmrLineOffset = prefix.split("\n").length - 1;
+			const hmrPrefix = options.hotMode
+				? `var __pcfHmrWsPort = ${options.wsPort};\n${HMR_CLIENT_SOURCE}\n`
+				: null;
+			const hmrLineOffset = hmrPrefix ? hmrPrefix.split("\n").length - 1 : 0;
+			if (hmrPrefix && filename === "bundle.js") {
+				body = Buffer.concat([Buffer.from(hmrPrefix), body]);
 			}
 			if (hmrLineOffset > 0 && filename === "bundle.js.map") {
 				try {
@@ -739,12 +771,12 @@ async function startProxy(options: ProxyOptions): Promise<void> {
 			process.exit(1);
 		}
 
-		if (options.watchBundle && controlPlane) {
+		if (options.watchBundle) {
 			watcher = watchBundleAndEnqueue(options.servingDir, options.controlName, controlPlane.enqueueReload);
 		}
 	}
 
-	await launchBrowserWithProxy(options.port, ca.cert, options.browser, options.autoYes, options.hotMode);
+	await launchBrowserWithProxy(options, ca.cert);
 
 	let shuttingDown = false;
 	async function shutdown() {
@@ -882,8 +914,12 @@ Options:
   --dir <path>            Directory to serve files from (auto-detected from manifest)
   --control <name>        Override control name (e.g. cc_Projectum.PowerRoadmap)
   --browser <name>        Browser to use: chrome, edge (default: auto-detect)
-  --hot                   Enable hot-reload mode (Chrome only)
+  --hot                   Enable hot-reload mode (default: on, Chrome only)
+  --no-hot                Disable hot-reload mode
   --watch-bundle          Watch bundle.js and emit reload (only with --hot)
+  --url <url>             URL to open in browser
+  --cdp-port <number>     Expose Chrome DevTools Protocol port (for agent-browser connect)
+  --agent-browser         Use agent-browser CLI as launcher (requires agent-browser installed)
   -y, --yes               Skip browser launch prompt
   -h, --help              Show this help
 
@@ -948,8 +984,11 @@ export async function main(): Promise<void> {
 	let controlOverride: string | null = null;
 	let browserOverride: Browser | null = null;
 	let skipPrompt = false;
-	let hotMode = false;
+	let hotMode = true;
 	let watchBundle = false;
+	let cdpPort: number | null = null;
+	let agentBrowser = false;
+	let url: string | null = null;
 
 	for (let i = 0; i < args.length; i++) {
 		if (args[i] === "--port" && args[i + 1]) {
@@ -968,10 +1007,18 @@ export async function main(): Promise<void> {
 			browserOverride = b;
 		} else if (args[i] === "--hot") {
 			hotMode = true;
+		} else if (args[i] === "--no-hot") {
+			hotMode = false;
 		} else if (args[i] === "--watch-bundle") {
 			watchBundle = true;
 		} else if (args[i] === "--yes" || args[i] === "-y") {
 			skipPrompt = true;
+		} else if (args[i] === "--cdp-port" && args[i + 1]) {
+			cdpPort = parsePort(args[++i], "cdp-port");
+		} else if (args[i] === "--agent-browser") {
+			agentBrowser = true;
+		} else if (args[i] === "--url" && args[i + 1]) {
+			url = args[++i];
 		} else if (args[i] === "--help" || args[i] === "-h") {
 			const detected = detectControl(CWD);
 			printHelp(browserOverride || detectBrowser(), detected);
@@ -981,6 +1028,10 @@ export async function main(): Promise<void> {
 
 	if (watchBundle && !hotMode) {
 		throw new Error("--watch-bundle can only be used with --hot");
+	}
+
+	if (agentBrowser && browserOverride === "edge") {
+		throw new Error("--agent-browser cannot be used with --browser edge. agent-browser uses its own Chromium.");
 	}
 
 	const browser = browserOverride || detectBrowser();
@@ -999,6 +1050,9 @@ export async function main(): Promise<void> {
 		autoYes: skipPrompt,
 		hotMode,
 		watchBundle,
+		cdpPort,
+		agentBrowser,
+		url,
 	});
 }
 

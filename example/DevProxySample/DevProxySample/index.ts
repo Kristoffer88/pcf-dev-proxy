@@ -27,7 +27,7 @@ export class DevProxySample implements ComponentFramework.StandardControl<IInput
         this.shell.style.background = "linear-gradient(135deg, #e9f6ec 0%, #f5fbf7 100%)";
 
         this.status = document.createElement("div");
-        this.status.textContent = "HMR Active - v6 verified!";
+        this.status.textContent = "HMR Active - v7 agent-browser verified!";
         this.status.style.fontFamily = "'Segoe UI', Tahoma, sans-serif";
         this.status.style.fontSize = "12px";
         this.status.style.fontWeight = "600";
