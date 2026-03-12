@@ -105,6 +105,7 @@ interface ProxyOptions {
 	cdpPort: number | null;
 	agentBrowser: boolean;
 	url: string | null;
+	noBrowser: boolean;
 }
 
 interface ReloadRequest {
@@ -776,7 +777,11 @@ async function startProxy(options: ProxyOptions): Promise<void> {
 		}
 	}
 
-	await launchBrowserWithProxy(options, ca.cert);
+	if (!options.noBrowser) {
+		await launchBrowserWithProxy(options, ca.cert);
+	} else {
+		console.log("Browser launch skipped (--no-browser). Proxy is listening on port " + options.port);
+	}
 
 	let shuttingDown = false;
 	async function shutdown() {
@@ -918,6 +923,7 @@ Options:
   --no-hot                Disable hot-reload mode
   --watch-bundle          Watch bundle.js and emit reload (only with --hot)
   --url <url>             URL to open in browser
+  --no-browser            Run proxy only, don't launch a browser (for external browser or agent use)
   --cdp-port <number>     Expose Chrome DevTools Protocol port (for agent-browser connect)
   --agent-browser         Use agent-browser CLI as launcher (requires agent-browser installed)
   -y, --yes               Skip browser launch prompt
@@ -988,6 +994,7 @@ export async function main(): Promise<void> {
 	let watchBundle = false;
 	let cdpPort: number | null = null;
 	let agentBrowser = false;
+	let noBrowser = false;
 	let url: string | null = null;
 
 	for (let i = 0; i < args.length; i++) {
@@ -1017,6 +1024,8 @@ export async function main(): Promise<void> {
 			cdpPort = parsePort(args[++i], "cdp-port");
 		} else if (args[i] === "--agent-browser") {
 			agentBrowser = true;
+		} else if (args[i] === "--no-browser") {
+			noBrowser = true;
 		} else if (args[i] === "--url" && args[i + 1]) {
 			url = args[++i];
 		} else if (args[i] === "--help" || args[i] === "-h") {
@@ -1032,6 +1041,10 @@ export async function main(): Promise<void> {
 
 	if (agentBrowser && browserOverride === "edge") {
 		throw new Error("--agent-browser cannot be used with --browser edge. agent-browser uses its own Chromium.");
+	}
+
+	if (noBrowser && agentBrowser) {
+		throw new Error("--no-browser and --agent-browser are mutually exclusive.");
 	}
 
 	const browser = browserOverride || detectBrowser();
@@ -1053,6 +1066,7 @@ export async function main(): Promise<void> {
 		cdpPort,
 		agentBrowser,
 		url,
+		noBrowser,
 	});
 }
 
