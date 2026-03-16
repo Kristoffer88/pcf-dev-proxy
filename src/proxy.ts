@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --max-http-header-size=65536
 /**
  * HTTPS MITM proxy that intercepts deployed PCF bundle requests and serves local files instead.
  *
@@ -10,8 +10,8 @@ import * as fs from "fs";
 import * as http from "http";
 import * as os from "os";
 import * as path from "path";
-import * as readline from "readline";
-import { execSync, spawn } from "child_process";
+import * as zlib from "zlib";
+import { spawn } from "child_process";
 import * as mockttp from "mockttp";
 import { WebSocketServer, WebSocket as WsWebSocket } from "ws";
 import { HMR_CLIENT_SOURCE } from "./hmr-client";
@@ -91,21 +91,14 @@ const CA_CERT_PATH = path.join(CACHE_DIR, "proxy-ca.pem");
 const CA_KEY_PATH = path.join(CACHE_DIR, "proxy-ca.key");
 const CA_NAME = "PCF Dev Proxy CA";
 
-type Browser = "chrome" | "edge";
-
 interface ProxyOptions {
 	port: number;
 	wsPort: number;
 	servingDir: string;
 	controlName: string;
-	browser: Browser;
-	autoYes: boolean;
 	hotMode: boolean;
 	watchBundle: boolean;
-	cdpPort: number | null;
-	agentBrowser: boolean;
-	url: string | null;
-	noBrowser: boolean;
+	launchBrowser: boolean;
 }
 
 interface ReloadRequest {
@@ -147,10 +140,10 @@ interface HmrControlPlane {
 }
 
 // ---------------------------------------------------------------------------
-// Browser data dir (persistent profile so cookies/auth survive restarts)
+// Chrome profile dir (persistent profile so cookies/auth survive restarts)
 // ---------------------------------------------------------------------------
 
-function getBrowserDataDir(): string {
+function getProfileDir(): string {
 	const dir = path.join(os.homedir(), ".pcf-dev-proxy", "chrome-profile");
 	fs.mkdirSync(dir, { recursive: true });
 	return dir;
@@ -184,153 +177,77 @@ function getSpkiFingerprint(certPem: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Browser launch
+// Browser helpers
 // ---------------------------------------------------------------------------
 
-function confirm(question: string): Promise<boolean> {
-	return new Promise((resolve) => {
-		const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-		rl.question(`${question} [Y/n] `, (answer: string) => {
-			rl.close();
-			resolve(!answer || answer.toLowerCase().startsWith("y"));
-		});
-	});
-}
-
-const EDGE_PATHS_WIN = [
-	"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-	"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-];
-
-function detectBrowser(): Browser {
-	try {
-		if (process.platform === "win32") {
-			const out = execSync('reg query "HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice" /v ProgId', { encoding: "utf-8", stdio: "pipe" });
-			if (out.includes("MSEdgeHTM")) return "edge";
-			if (out.includes("ChromeHTML")) return "chrome";
-		} else if (process.platform === "darwin") {
-			const out = execSync("defaults read com.apple.LaunchServices/com.apple.launchservices.secure LSHandlers 2>/dev/null || true", { encoding: "utf-8", stdio: "pipe" });
-			if (out.includes("com.microsoft.edgemac")) return "edge";
-		}
-	} catch {
-		// Fall through to defaults
-	}
-	return "chrome";
-}
-
-function getBrowserBinary(browser: Browser): string {
-	if (process.platform === "darwin") {
-		const name = browser === "edge" ? "Microsoft Edge" : "Google Chrome";
-		return `/Applications/${name}.app/Contents/MacOS/${name}`;
-	}
-	if (browser === "edge") {
-		return EDGE_PATHS_WIN.find((p) => fs.existsSync(p)) || "msedge";
-	}
-	const chromePaths = [
-		"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-		"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-	];
-	return chromePaths.find((p) => fs.existsSync(p)) || "chrome";
-}
-
-function isBrowserAlreadyRunning(dataDir: string): boolean {
-	try {
-		if (process.platform === "win32") {
-			// Chrome holds a lock on <dataDir>/lockfile while running.
-			const lockFile = path.join(dataDir, "lockfile");
-			return fs.existsSync(lockFile);
-		} else {
-			// macOS / Linux: pgrep -f matches against full command line
-			execSync(`pgrep -f "user-data-dir=${dataDir}"`, { encoding: "utf-8", stdio: "pipe" });
-			return true; // pgrep exits 0 → match found
-		}
-	} catch {
-		return false; // pgrep exits 1 → no match
-	}
-}
-
-async function launchBrowserWithProxy(
-	options: ProxyOptions,
-	certPem: string,
-): Promise<void> {
-	const dataDir = getBrowserDataDir();
-
-	// agent-browser launcher — manages its own browser sessions
-	if (options.agentBrowser) {
-		const abArgs = [
-			"--proxy", `http://127.0.0.1:${options.port}`,
-			"--ignore-https-errors",
-			"--profile", dataDir,
-		];
-		if (options.cdpPort) abArgs.push("--cdp", String(options.cdpPort));
-		abArgs.push("open", options.url || "about:blank");
-		spawn("agent-browser", abArgs, { detached: true, stdio: "ignore" }).unref();
-		console.log("Launched agent-browser with proxy.");
-		return;
-	}
-
-	const label = options.browser === "edge" ? "Edge" : "Chrome";
-	const spki = getSpkiFingerprint(certPem);
-	const binary = getBrowserBinary(options.browser);
-
-	if (isBrowserAlreadyRunning(dataDir)) {
-		if (options.url) {
-			// Open URL in existing Chrome instance (same profile → reuses running process)
-			try {
-				const child = spawn(binary, [`--user-data-dir=${dataDir}`, options.url], { detached: true, stdio: "ignore" });
-				child.unref();
-				console.log(`${label} already running — opened URL in existing instance.`);
-			} catch {
-				console.log(`${label} already running. Could not open URL — open it manually.`);
-			}
-		} else {
-			console.log(`${label} already running with proxy profile — skipping launch.`);
-		}
-		return;
-	}
-
-	const browserArgs = [
-		`--proxy-server=127.0.0.1:${options.port}`,
+function buildChromeArgs(port: number, spki: string, profileDir: string): string[] {
+	return [
+		`--proxy-server=127.0.0.1:${port}`,
 		`--ignore-certificate-errors-spki-list=${spki}`,
-		`--user-data-dir=${dataDir}`,
+		`--user-data-dir=${profileDir}`,
 		"--disable-session-crashed-bubble",
 	];
+}
 
-	if (options.cdpPort) {
-		browserArgs.push(`--remote-debugging-port=${options.cdpPort}`);
+function getChromeBinary(): string {
+	if (process.platform === "darwin") {
+		return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 	}
-
-	if (options.url) {
-		browserArgs.push(options.url);
+	if (process.platform === "win32") {
+		const paths = [
+			"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+			"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+		];
+		return paths.find((p) => fs.existsSync(p)) || "chrome";
 	}
+	return "google-chrome";
+}
 
-	const shouldLaunch = options.autoYes || await confirm(`Launch ${label} with proxy?`);
-	if (!shouldLaunch) {
-		console.log(`Skipping ${label} launch. Start manually with:\n  "${binary}" ${browserArgs.join(" ")}`);
-		return;
+function getEdgeBinary(): string {
+	if (process.platform === "darwin") {
+		return "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge";
 	}
+	if (process.platform === "win32") {
+		return "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
+	}
+	return "microsoft-edge";
+}
 
-	const fullCmd = `"${binary}" ${browserArgs.join(" ")}`;
+function printConnectionInfo(port: number, spki: string, profileDir: string): void {
+	const proxyUrl = `http://127.0.0.1:${port}`;
+	const flags = buildChromeArgs(port, spki, profileDir).join(" ");
+	const chromeBin = JSON.stringify(getChromeBinary());
+	const edgeBin = JSON.stringify(getEdgeBinary());
 
+	console.log(`
+--- Connect a browser ---
+Proxy:       ${proxyUrl}
+SPKI hash:   ${spki}
+Profile dir: ${profileDir}
+
+Chrome:
+  ${chromeBin} ${flags}
+
+Edge:
+  ${edgeBin} ${flags}
+
+Playwright:
+  browser.launch({ proxy: { server: '${proxyUrl}' }, ignoreHTTPSErrors: true })
+
+agent-browser:
+  agent-browser --proxy ${proxyUrl} --ignore-https-errors open <url>
+`);
+}
+
+function launchChrome(port: number, spki: string, profileDir: string): void {
+	const binary = getChromeBinary();
+	const args = buildChromeArgs(port, spki, profileDir);
 	try {
-		if (process.platform === "win32") {
-			const taskName = "PCFDevProxyBrowser";
-			execSync(`schtasks /Create /TN "${taskName}" /TR "${fullCmd.replace(/"/g, '\\"')}" /SC ONCE /ST 00:00 /F /RL HIGHEST`, { stdio: "pipe" });
-			execSync(`schtasks /Run /TN "${taskName}"`, { stdio: "pipe" });
-			execSync(`schtasks /Delete /TN "${taskName}" /F`, { stdio: "pipe" });
-		} else {
-			const child = spawn(binary, browserArgs, { detached: true, stdio: "ignore" });
-			child.unref();
-		}
-		console.log(`Launched ${label} with proxy (isolated profile).`);
-		if (options.cdpPort) {
-			console.log(`CDP available on port ${options.cdpPort}.`);
-		}
-		if (options.hotMode) {
-			console.log("Hot mode enabled: HMR control plane active.");
-		}
+		const child = spawn(binary, args, { detached: true, stdio: "ignore" });
+		child.unref();
+		console.log("Launched Chrome with proxy.");
 	} catch {
-		console.log(`Could not launch ${label}. Start manually with:\n  ${fullCmd}`);
+		console.log(`Could not launch Chrome. Start manually with:\n  "${binary}" ${args.join(" ")}`);
 	}
 }
 
@@ -545,7 +462,7 @@ export function createHmrControlPlane(wsPort: number, fallbackControlName: strin
 				const body = await readJsonBody(req);
 				const request = toReloadRequest(body, fallbackControlName);
 				const message = enqueueReload(request);
-				sendJson(res, 200, { accepted: true, id: message.id });
+				sendJson(res, 200, { accepted: true, id: message.id, controlName: message.controlName });
 			} catch (err) {
 				sendJson(res, 400, { error: `Invalid reload payload: ${(err as Error).message}` });
 			}
@@ -610,6 +527,9 @@ export function createHmrControlPlane(wsPort: number, fallbackControlName: strin
 				close: async () => {
 					for (const queue of queues.values()) {
 						if (queue.timer) clearTimeout(queue.timer);
+					}
+					for (const client of wss.clients) {
+						client.terminate();
 					}
 					await new Promise<void>((done) => wss.close(() => done()));
 					await new Promise<void>((done) => httpServer.close(() => done()));
@@ -725,17 +645,29 @@ async function startProxy(options: ProxyOptions): Promise<void> {
 				body = Buffer.concat([body, Buffer.from(`\n//# sourceMappingURL=${filename}.map\n`)]);
 			}
 
-			const kb = Math.round(body.length / 1024);
+			const originalKb = Math.round(body.length / 1024);
 			const hmrTag = options.hotMode && filename === "bundle.js" ? " [+HMR]" : "";
-			console.log(`  200  ${filename} (${kb} KB)${hmrTag}`);
+			const acceptEncoding = req.headers["accept-encoding"] ?? "";
+			const supportsGzip = acceptEncoding.includes("gzip");
+
+			const responseHeaders: Record<string, string> = {
+				"content-type": contentType(filename),
+				"cache-control": "no-cache, no-store, must-revalidate",
+				"access-control-allow-origin": "*",
+			};
+
+			if (supportsGzip) {
+				body = zlib.gzipSync(body);
+				responseHeaders["content-encoding"] = "gzip";
+				const gzKb = Math.round(body.length / 1024);
+				console.log(`  200  ${filename} (${originalKb} KB → ${gzKb} KB gz)${hmrTag}`);
+			} else {
+				console.log(`  200  ${filename} (${originalKb} KB)${hmrTag}`);
+			}
 
 			return {
 				statusCode: 200,
-				headers: {
-					"content-type": contentType(filename),
-					"cache-control": "no-cache, no-store, must-revalidate",
-					"access-control-allow-origin": "*",
-				},
+				headers: responseHeaders,
 				rawBody: body,
 			};
 		});
@@ -777,17 +709,15 @@ async function startProxy(options: ProxyOptions): Promise<void> {
 		}
 	}
 
-	if (!options.noBrowser) {
-		await launchBrowserWithProxy(options, ca.cert);
-	} else {
-		console.log("Browser launch skipped (--no-browser). Proxy is listening on port " + options.port);
-	}
+	const spki = getSpkiFingerprint(ca.cert);
+	const profileDir = getProfileDir();
 
 	let shuttingDown = false;
 	async function shutdown() {
 		if (shuttingDown) return;
 		shuttingDown = true;
 		console.log("\nShutting down proxy...");
+		setTimeout(() => process.exit(0), 2000).unref();
 		if (watcher) watcher.close();
 		if (controlPlane) await controlPlane.close();
 		await server.stop();
@@ -795,19 +725,26 @@ async function startProxy(options: ProxyOptions): Promise<void> {
 	}
 
 	process.on("exit", () => { console.error = _consoleError; });
-	process.on("SIGINT", () => { shutdown(); });
-	process.on("SIGTERM", () => { shutdown(); });
+	process.on("SIGINT", () => { shutdown().catch(() => process.exit(1)); });
+	process.on("SIGTERM", () => { shutdown().catch(() => process.exit(1)); });
 
 	console.log(`\nPCF Dev Proxy running on port ${options.port}`);
 	console.log(`Intercepting: ${options.controlName}/*`);
 	console.log(`Serving from: ${options.servingDir}`);
 	if (options.hotMode) {
 		console.log(`Hot mode: ON (control plane http://127.0.0.1:${options.wsPort})`);
+		console.log(`  HMR client is injected into bundle.js — any browser connecting through the proxy gets live reload.`);
+		console.log(`  Trigger reload: curl -X POST http://127.0.0.1:${options.wsPort}/reload -H "Content-Type: application/json" -d '{"trigger":"manual"}'`);
 		console.log(`Hot fallback watcher: ${options.watchBundle ? "ON" : "OFF"}`);
 	} else {
 		console.log("Hot mode: OFF");
 	}
-	console.log();
+
+	printConnectionInfo(options.port, spki, profileDir);
+
+	if (options.launchBrowser) {
+		launchChrome(options.port, spki, profileDir);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -906,7 +843,7 @@ Options:
 // CLI
 // ---------------------------------------------------------------------------
 
-function printHelp(detectedBrowser: Browser, detectedControl: { controlName: string; constructor: string; manifestDir: string } | null): void {
+function printHelp(detectedControl: { controlName: string; constructor: string; manifestDir: string } | null): void {
 	console.log(`PCF Dev Proxy - HTTPS MITM proxy for local PCF development
 
 Usage:
@@ -918,22 +855,17 @@ Options:
   --ws-port <number>      HMR control plane port (default: 8643)
   --dir <path>            Directory to serve files from (auto-detected from manifest)
   --control <name>        Override control name (e.g. cc_Projectum.PowerRoadmap)
-  --browser <name>        Browser to use: chrome, edge (default: auto-detect)
-  --hot                   Enable hot-reload mode (default: on, Chrome only)
+  --hot                   Enable hot-reload mode (default: on). Injects HMR client into
+                          bundle.js so any browser through the proxy gets live reload.
   --no-hot                Disable hot-reload mode
-  --watch-bundle          Watch bundle.js and emit reload (only with --hot)
-  --url <url>             URL to open in browser
-  --no-browser            Run proxy only, don't launch a browser (for external browser or agent use)
-  --cdp-port <number>     Expose Chrome DevTools Protocol port (for agent-browser connect)
-  --agent-browser         Use agent-browser CLI as launcher (requires agent-browser installed)
-  -y, --yes               Skip browser launch prompt
+  --watch-bundle          Watch bundle.js for changes and trigger reload automatically (only with --hot)
+  --launch-browser        Launch Chrome with proxy flags (isolated profile)
   -h, --help              Show this help
 
 Reload subcommand:
-  pcf-dev-proxy reload --control <name> [--ws-port <number>] [--build-id <id>] [--trigger <source>]
+  pcf-dev-proxy reload --control <name> [--ws-port <number>] [--build-id <id>] [--trigger <source>] [--changed-files <csv>]
 
-Auto-detected: ${detectedControl ? `${detectedControl.controlName} (from ${detectedControl.manifestDir})` : "no manifest found"}
-Browser: ${detectedBrowser}`);
+Auto-detected: ${detectedControl ? `${detectedControl.controlName} (from ${detectedControl.manifestDir})` : "no manifest found"}`);
 }
 
 function resolveControlAndServingDir(controlOverride: string | null, dirOverride: string | null): { controlName: string; servingDir: string } {
@@ -988,14 +920,9 @@ export async function main(): Promise<void> {
 	let wsPort = 8643;
 	let dirOverride: string | null = null;
 	let controlOverride: string | null = null;
-	let browserOverride: Browser | null = null;
-	let skipPrompt = false;
 	let hotMode = true;
 	let watchBundle = false;
-	let cdpPort: number | null = null;
-	let agentBrowser = false;
-	let noBrowser = false;
-	let url: string | null = null;
+	let launchBrowser = false;
 
 	for (let i = 0; i < args.length; i++) {
 		if (args[i] === "--port" && args[i + 1]) {
@@ -1006,50 +933,23 @@ export async function main(): Promise<void> {
 			dirOverride = args[++i];
 		} else if (args[i] === "--control" && args[i + 1]) {
 			controlOverride = args[++i];
-		} else if (args[i] === "--browser" && args[i + 1]) {
-			const b = args[++i].toLowerCase();
-			if (b !== "chrome" && b !== "edge") {
-				throw new Error(`Unknown browser: ${b}. Use "chrome" or "edge".`);
-			}
-			browserOverride = b;
 		} else if (args[i] === "--hot") {
 			hotMode = true;
 		} else if (args[i] === "--no-hot") {
 			hotMode = false;
 		} else if (args[i] === "--watch-bundle") {
 			watchBundle = true;
-		} else if (args[i] === "--yes" || args[i] === "-y") {
-			skipPrompt = true;
-		} else if (args[i] === "--cdp-port" && args[i + 1]) {
-			cdpPort = parsePort(args[++i], "cdp-port");
-		} else if (args[i] === "--agent-browser") {
-			agentBrowser = true;
-		} else if (args[i] === "--no-browser") {
-			noBrowser = true;
-		} else if (args[i] === "--url" && args[i + 1]) {
-			url = args[++i];
+		} else if (args[i] === "--launch-browser") {
+			launchBrowser = true;
 		} else if (args[i] === "--help" || args[i] === "-h") {
 			const detected = detectControl(CWD);
-			printHelp(browserOverride || detectBrowser(), detected);
+			printHelp(detected);
 			return;
 		}
 	}
 
 	if (watchBundle && !hotMode) {
 		throw new Error("--watch-bundle can only be used with --hot");
-	}
-
-	if (agentBrowser && browserOverride === "edge") {
-		throw new Error("--agent-browser cannot be used with --browser edge. agent-browser uses its own Chromium.");
-	}
-
-	if (noBrowser && agentBrowser) {
-		throw new Error("--no-browser and --agent-browser are mutually exclusive.");
-	}
-
-	const browser = browserOverride || detectBrowser();
-	if (hotMode && browser !== "chrome") {
-		throw new Error("Hot mode currently supports Chrome only. Use --browser chrome.");
 	}
 
 	const resolved = resolveControlAndServingDir(controlOverride, dirOverride);
@@ -1059,14 +959,9 @@ export async function main(): Promise<void> {
 		wsPort,
 		servingDir: resolved.servingDir,
 		controlName: resolved.controlName,
-		browser,
-		autoYes: skipPrompt,
 		hotMode,
 		watchBundle,
-		cdpPort,
-		agentBrowser,
-		url,
-		noBrowser,
+		launchBrowser,
 	});
 }
 

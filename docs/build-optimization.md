@@ -15,7 +15,7 @@ npx pcf-scripts start watch
 npx pcf-dev-proxy \
   --control "cc_Example.DevProxySample" \
   --dir "example/DevProxySample/out/controls/DevProxySample" \
-  --hot -y --browser chrome
+  --hot
 ```
 
 **Agent workflow:**
@@ -49,7 +49,7 @@ Every save triggers an immediate reload — instant feedback for VS Code editing
 npx pcf-dev-proxy \
   --control "cc_Example.DevProxySample" \
   --dir "example/DevProxySample/out/controls/DevProxySample" \
-  --hot --watch-bundle -y --browser chrome
+  --hot --watch-bundle
 ```
 
 **Flow:** save file → webpack rebuild (~200ms) → watch-bundle detects `bundle.js` change (500ms debounce) → auto-reload (~70ms). Total: **~700ms from save to UI update**.
