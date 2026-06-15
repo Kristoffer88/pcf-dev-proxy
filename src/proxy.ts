@@ -99,6 +99,14 @@ interface ProxyOptions {
 	hotMode: boolean;
 	watchBundle: boolean;
 	launchBrowser: boolean;
+	/**
+	 * Optional base URL (e.g. http://localhost:8787) to forward Dataverse Web API
+	 * traffic to instead of the live host. When set, any request whose path starts
+	 * with /api/data is rewritten to this origin (path + query preserved), so a
+	 * local control runs against a Dataverse emulator while the page itself stays
+	 * live. Leave undefined for normal passthrough to the real Dataverse.
+	 */
+	apiRedirect?: string;
 }
 
 interface ReloadRequest {
@@ -672,6 +680,31 @@ async function startProxy(options: ProxyOptions): Promise<void> {
 			};
 		});
 
+	// Optional: forward Dataverse Web API traffic to a local emulator instead of
+	// the live host. Matches before the passthrough fallback; rewrites only the
+	// origin so /api/data/v9.x/... lands on the emulator with path+query intact.
+	if (options.apiRedirect) {
+		const apiTarget = new URL(options.apiRedirect);
+		await server
+			.forAnyRequest()
+			.matching((req) => {
+				try {
+					return new URL(req.url).pathname.startsWith("/api/data");
+				} catch {
+					return false;
+				}
+			})
+			.thenPassThrough({
+				beforeRequest: (req) => {
+					const u = new URL(req.url);
+					u.protocol = apiTarget.protocol;
+					u.host = apiTarget.host;
+					console.log(`  →emu ${req.method} ${u.pathname}${u.search ? "?…" : ""}`);
+					return { url: u.toString() };
+				},
+			});
+	}
+
 	await server.forUnmatchedRequest().thenPassThrough(options.hotMode ? {
 		beforeResponse: (response) => {
 			const headers = { ...response.headers };
@@ -731,6 +764,9 @@ async function startProxy(options: ProxyOptions): Promise<void> {
 	console.log(`\nPCF Dev Proxy running on port ${options.port}`);
 	console.log(`Intercepting: ${options.controlName}/*`);
 	console.log(`Serving from: ${options.servingDir}`);
+	if (options.apiRedirect) {
+		console.log(`API redirect: /api/data/* → ${options.apiRedirect}`);
+	}
 	if (options.hotMode) {
 		console.log(`Hot mode: ON (control plane http://127.0.0.1:${options.wsPort})`);
 		console.log(`  HMR client is injected into bundle.js — any browser connecting through the proxy gets live reload.`);
@@ -923,9 +959,12 @@ export async function main(): Promise<void> {
 	let hotMode = true;
 	let watchBundle = false;
 	let launchBrowser = false;
+	let apiRedirect: string | undefined;
 
 	for (let i = 0; i < args.length; i++) {
-		if (args[i] === "--port" && args[i + 1]) {
+		if (args[i] === "--api-redirect" && args[i + 1]) {
+			apiRedirect = args[++i];
+		} else if (args[i] === "--port" && args[i + 1]) {
 			port = parsePort(args[++i], "port");
 		} else if (args[i] === "--ws-port" && args[i + 1]) {
 			wsPort = parsePort(args[++i], "ws-port");
@@ -962,6 +1001,7 @@ export async function main(): Promise<void> {
 		hotMode,
 		watchBundle,
 		launchBrowser,
+		apiRedirect,
 	});
 }
 
